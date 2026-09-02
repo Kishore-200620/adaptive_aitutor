@@ -1,5 +1,9 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
+from uuid import uuid4
+
+from app.avatar.jobs import create_job
+from app.avatar.runner import generate_avatar_background
 from sqlalchemy.orm import Session
 from app.rag.retriever import retrieve_relevant_chunks
 from app.database.connection import get_db
@@ -8,9 +12,9 @@ from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
 from app.voice.tts import TTSService
 from app.models.student import Student
-from app.avatar.jobs import create_job
+
 from app.avatar.service import AvatarService
-from uuid import uuid4
+
 from app.api.routes.avatar import generate_avatar_background
 router = APIRouter(
     prefix="/lessons",
@@ -51,6 +55,7 @@ def extract_speech_text(teaching: str) -> str:
 @router.post("/start")
 async def start_lesson(
     request: StartLessonRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
 
@@ -66,11 +71,12 @@ async def start_lesson(
 
     # 1. Create persistent lesson + concepts + session
     lesson, concepts, session = learning_service.create_lesson_session(
-        db=db,
-        student_id=request.student_id,
-        topic=request.topic,
-        document_id=request.document_id,
-    )
+    db=db,
+    student_id=request.student_id,
+    topic=request.topic,
+    document_id=request.document_id,
+    language=language,
+)
 
     # 2. Start AI Teacher
     teaching_context = None
@@ -97,7 +103,19 @@ async def start_lesson(
     text=speech_text,
     language=language,
     filename=audio_filename,
-)
+    )
+    avatar_job_id = str(uuid4())
+
+    create_job(avatar_job_id)
+
+    avatar_filename = f"lesson_{session.id}_teacher.mp4"
+
+    background_tasks.add_task(
+        generate_avatar_background,
+        avatar_job_id,
+        str(audio_path),
+        avatar_filename,
+    )
     # 3. Keep database session aligned with TeacherState
     if concepts:
         learning_service.update_session(
@@ -116,6 +134,8 @@ async def start_lesson(
     "teaching": result["teaching"],
     "question": result["question"],
     "audio_url": f"/voice/audio/{audio_filename}",
+    "avatar_job_id": avatar_job_id,
+    "avatar_status_url": f"/avatar/status/{avatar_job_id}",
     "state": result["state"].summary(),
 }
 
