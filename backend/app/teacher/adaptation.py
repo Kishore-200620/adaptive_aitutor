@@ -5,20 +5,19 @@ class AdaptationEngine:
 
     def adapt(self, state: TeacherState) -> None:
 
-        # Very low mastery
+        # Select teaching strategy based on mastery
         if state.mastery_score < 0.4:
             state.teaching_strategy = "analogy_and_example"
 
-        # Partial understanding
-        elif state.mastery_score < 0.8:
+        elif state.mastery_score < 0.7:
             state.teaching_strategy = "guided_explanation"
 
-        # Strong understanding
         else:
             state.teaching_strategy = "direct_explanation"
 
         # Student has mastered the current concept
         if state.mastery_score >= 0.8:
+
             state.mark_understood()
 
             if (
@@ -34,7 +33,17 @@ class AdaptationEngine:
                     state.current_concept
                 )
 
-        # Student has not mastered the concept yet
-        else:
-            state.needs_reteaching = True
-            state.current_phase = "reteaching"
+            return
+
+        # Any score below mastery threshold requires
+        # additional teaching/practice.
+        state.needs_reteaching = True
+        state.current_phase = "reteaching"
+
+        if (
+            state.current_concept
+            and state.current_concept not in state.concepts_struggling
+        ):
+            state.concepts_struggling.append(
+                state.current_concept
+            )

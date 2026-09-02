@@ -1,8 +1,13 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from app.database.connection import get_db
+from app.models.session import TeachingSession
+from app.models.concept import Concept
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
+from app.services.learning_service import LearningService
 
 
 router = APIRouter(
@@ -12,16 +17,34 @@ router = APIRouter(
 
 
 class AnswerRequest(BaseModel):
+    session_id: int
     state: dict
     answer: str
 
 
 teacher_engine = TeacherEngine()
+learning_service = LearningService()
 
 
 @router.post("/answer")
-def submit_answer(request: AnswerRequest):
+def submit_answer(
+    request: AnswerRequest,
+    db: Session = Depends(get_db),
+):
 
+    # 1. Load persistent teaching session
+    session = db.get(
+        TeachingSession,
+        request.session_id,
+    )
+
+    if session is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Teaching session not found",
+        )
+
+    # 2. Reconstruct TeacherState
     state_data = request.state
 
     state = TeacherState(
@@ -42,25 +65,89 @@ def submit_answer(request: AnswerRequest):
         attempt_count=state_data["attempt_count"],
     )
 
-    # 1. Evaluate the student's answer
+    # 3. Evaluate student's answer
     result = teacher_engine.answer(
         state,
         request.answer,
     )
 
-    # 2. Automatically continue the teaching loop
+    evaluation = result["evaluation"]
+
+    # 4. Find current database concept
+    concept = (
+        db.query(Concept)
+        .filter(
+            Concept.lesson_id == session.lesson_id,
+            Concept.title == state.current_concept,
+        )
+        .first()
+    )
+
+    if concept is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Current concept not found",
+        )
+
+    # 5. Save attempt
+    learning_service.save_attempt(
+        db=db,
+        session=session,
+        concept=concept,
+        question=state.last_question or "",
+        student_answer=request.answer,
+        is_correct=evaluation.correctness == "correct",
+        evaluation=evaluation.feedback,
+        misconception=evaluation.misconception,
+    )
+
+    # 6. Persist mastery
+    learning_service.update_concept_mastery(
+        db=db,
+        concept=concept,
+        mastery_score=evaluation.score,
+    )
+
+    # 7. Continue teaching loop
     next_step = teacher_engine.next_step(state)
 
+    # 8. Update persistent session
+    if next_step["action"] == "completed":
+
+        learning_service.update_session(
+            db=db,
+            session=session,
+            concept_id=None,
+            step="completed",
+            status="completed",
+        )
+
+    elif next_step["concept"]:
+
+        next_concept = (
+            db.query(Concept)
+            .filter(
+                Concept.lesson_id == session.lesson_id,
+                Concept.title == next_step["concept"],
+            )
+            .first()
+        )
+
+        if next_concept:
+
+            learning_service.update_session(
+                db=db,
+                session=session,
+                concept_id=next_concept.id,
+                step="question",
+            )
+
     return {
-        "evaluation": result["evaluation"].summary(),
-
+        "session_id": session.id,
+        "evaluation": evaluation.summary(),
         "action": next_step["action"],
-
         "concept": next_step["concept"],
-
         "teaching": next_step["teaching"],
-
         "question": next_step["question"],
-
         "state": state.summary(),
     }

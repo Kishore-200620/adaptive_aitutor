@@ -1,8 +1,11 @@
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
+from sqlalchemy.orm import Session
 
+from app.database.connection import get_db
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
+from app.services.learning_service import LearningService
 
 
 router = APIRouter(
@@ -21,17 +24,40 @@ class NextStepRequest(BaseModel):
 
 
 teacher_engine = TeacherEngine()
+learning_service = LearningService()
 
 
 @router.post("/start")
-def start_lesson(request: StartLessonRequest):
+def start_lesson(
+    request: StartLessonRequest,
+    db: Session = Depends(get_db),
+):
 
+    # 1. Create persistent lesson + concepts + session
+    lesson, concepts, session = learning_service.create_lesson_session(
+        db=db,
+        student_id=request.student_id,
+        topic=request.topic,
+    )
+
+    # 2. Start AI Teacher
     result = teacher_engine.start(
         student_id=request.student_id,
         topic=request.topic,
     )
 
+    # 3. Keep database session aligned with TeacherState
+    if concepts:
+        learning_service.update_session(
+            db=db,
+            session=session,
+            concept_id=concepts[0].id,
+            step="question",
+        )
+
     return {
+        "session_id": session.id,
+        "lesson_id": lesson.id,
         "student_id": request.student_id,
         "topic": request.topic,
         "concept": result["state"].current_concept,
@@ -42,7 +68,9 @@ def start_lesson(request: StartLessonRequest):
 
 
 @router.post("/next")
-def next_step(request: NextStepRequest):
+def next_step(
+    request: NextStepRequest,
+):
 
     state_data = request.state
 
