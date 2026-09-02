@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from app.database.connection import get_db
 from app.models.document import Document
+from app.services.document_processor import process_document
 
 
 router = APIRouter(
@@ -57,9 +58,22 @@ async def upload_document(
     db.commit()
     db.refresh(document)
 
-    return {
-        "message": "Document uploaded successfully",
-        "document_id": document.id,
-        "filename": document.filename,
-        "status": document.status,
-    }
+    try:
+        processing_result = process_document(
+            db=db,
+            document_id=document.id,
+        )
+
+        return {
+            "message": "Document uploaded and processed successfully",
+            "document_id": document.id,
+            "filename": document.filename,
+            "status": processing_result["status"],
+            "chunks_created": processing_result["chunks_created"],
+        }
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Document processing failed: {str(exc)}",
+        )

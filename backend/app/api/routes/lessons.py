@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
+from app.rag.retriever import retrieve_relevant_chunks
 from app.database.connection import get_db
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
@@ -17,6 +17,7 @@ router = APIRouter(
 class StartLessonRequest(BaseModel):
     student_id: int
     topic: str
+    document_id: int | None = None
 
 
 class NextStepRequest(BaseModel):
@@ -38,12 +39,24 @@ def start_lesson(
         db=db,
         student_id=request.student_id,
         topic=request.topic,
+        document_id=request.document_id,
     )
 
     # 2. Start AI Teacher
+    teaching_context = None
+
+    if request.document_id is not None:
+        teaching_context = retrieve_relevant_chunks(
+            db=db,
+            question=request.topic,
+            document_id=request.document_id,
+            limit=5,
+        )
+
     result = teacher_engine.start(
         student_id=request.student_id,
         topic=request.topic,
+        teaching_context=teaching_context,
     )
 
     # 3. Keep database session aligned with TeacherState

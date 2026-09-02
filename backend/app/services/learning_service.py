@@ -22,12 +22,14 @@ class LearningService:
         db: Session,
         student_id: int,
         topic: str,
+        document_id: int | None = None,
         difficulty: str = "beginner",
         language: str = "English",
     ):
         # 1. Create lesson
         lesson = Lesson(
             student_id=student_id,
+            document_id=document_id,
             title=f"{topic} Lesson",
             topic=topic,
             difficulty=difficulty,

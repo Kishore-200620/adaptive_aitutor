@@ -9,7 +9,14 @@ class TeachingEngine:
         self,
         state: TeacherState,
         plan: LessonPlan,
+        context: list[str] | None = None,
     ):
+        context_text = (
+            "\n\n".join(context)
+            if context
+            else "No reference material provided."
+        )
+
         prompt = f"""
 You are EDUVA, a human-like AI teacher.
 
@@ -24,6 +31,9 @@ Student misconceptions:
 Teaching goal:
 {plan.teaching_goal}
 
+REFERENCE MATERIAL:
+{context_text}
+
 Teach this concept to the student.
 
 Rules:
@@ -32,6 +42,10 @@ Rules:
 - Use a real-world example.
 - Do not assume prior knowledge.
 - Keep the explanation clear and conversational.
+- When reference material is provided, use it as the primary source.
+- Do not invent facts that contradict the reference material.
+- If the reference material does not contain enough information,
+  do not pretend that it does.
 - End with one question to check understanding.
 
 Return exactly in this format:

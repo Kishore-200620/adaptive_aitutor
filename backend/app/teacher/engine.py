@@ -18,11 +18,11 @@ class TeacherEngine:
         self.misconception = MisconceptionEngine()
         self.adaptation = AdaptationEngine()
         self.graph = ConceptGraph()
-
     def start(
         self,
         student_id: int,
         topic: str,
+        teaching_context: list[str] | None = None,
     ):
         state = TeacherState(
             student_id=student_id,
@@ -39,6 +39,7 @@ class TeacherEngine:
         teaching = self.teaching.generate(
             state,
             plan,
+            context=teaching_context,
         )
 
         # 4. Generate a question for the current concept
@@ -99,7 +100,11 @@ class TeacherEngine:
             "action": "reteach",
             "next_concept": None,
         }
-    def next_step(self, state: TeacherState):
+    def next_step(
+        self,
+        state: TeacherState,
+        teaching_context: list[str] | None = None,
+    ):
         # Student still needs help with the current concept
         if state.needs_reteaching:
             plan = self.planner.create_plan(state)
@@ -107,6 +112,7 @@ class TeacherEngine:
             teaching = self.teaching.generate(
                 state,
                 plan,
+                context=teaching_context,
             )
 
             question = self.questioning.generate_question(
@@ -150,9 +156,10 @@ class TeacherEngine:
         plan = self.planner.create_plan(state)
 
         teaching = self.teaching.generate(
-            state,
-            plan,
-        )
+        state,
+        plan,
+        context=teaching_context,
+    )
 
         question = self.questioning.generate_question(
             state,

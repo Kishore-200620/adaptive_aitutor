@@ -9,6 +9,8 @@ from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
 
+from app.models.lesson import Lesson
+from app.rag.retriever import retrieve_relevant_chunks
 
 router = APIRouter(
     prefix="/lessons",
@@ -42,6 +44,17 @@ def submit_answer(
         raise HTTPException(
             status_code=404,
             detail="Teaching session not found",
+        )
+
+    lesson = db.get(
+        Lesson,
+        session.lesson_id,
+    )
+
+    if lesson is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Lesson not found",
         )
 
     # 2. Reconstruct TeacherState
@@ -109,8 +122,28 @@ def submit_answer(
     )
 
     # 7. Continue teaching loop
-    next_step = teacher_engine.next_step(state)
+    teaching_context = None
 
+    if lesson.document_id is not None:
+
+        if state.needs_reteaching:
+            context_query = state.current_concept or state.topic
+
+        else:
+            next_concept = teacher_engine.graph.get_next_concept(state)
+            context_query = next_concept or state.topic
+
+        teaching_context = retrieve_relevant_chunks(
+            db=db,
+            question=context_query,
+            document_id=lesson.document_id,
+            limit=5,
+        )
+
+    next_step = teacher_engine.next_step(
+        state,
+        teaching_context=teaching_context,
+    )
     # 8. Update persistent session
     if next_step["action"] == "completed":
 
