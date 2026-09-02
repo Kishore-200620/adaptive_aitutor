@@ -1,6 +1,10 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
+from uuid import uuid4
+
+from app.avatar.jobs import create_job
+from app.avatar.runner import generate_avatar_background
 
 from app.database.connection import get_db
 from app.models.session import TeachingSession
@@ -45,6 +49,7 @@ def extract_speech_text(teaching: str) -> str:
 @router.post("/answer")
 async def submit_answer(
     request: AnswerRequest,
+    background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
 ):
 
@@ -161,8 +166,10 @@ async def submit_answer(
     )
 
     audio_url = None
+    avatar_job_id = None
 
     if next_step["teaching"]:
+
         audio_filename = (
             f"lesson_{session.id}_attempt_{state.attempt_count}.mp3"
         )
@@ -171,12 +178,28 @@ async def submit_answer(
             next_step["teaching"]
         )
 
-        await tts_service.generate_speech(
-    text=speech_text,
-    language=state.language,
-    filename=audio_filename,
-)
+        audio_path = await tts_service.generate_speech(
+            text=speech_text,
+            language=state.language,
+            filename=audio_filename,
+        )
+
         audio_url = f"/voice/audio/{audio_filename}"
+
+        avatar_job_id = str(uuid4())
+
+        create_job(avatar_job_id)
+
+        avatar_filename = (
+            f"lesson_{session.id}_attempt_{state.attempt_count}.mp4"
+        )
+
+        background_tasks.add_task(
+            generate_avatar_background,
+            avatar_job_id,
+            str(audio_path),
+            avatar_filename,
+        )
 
     # 8. Update persistent session
     if next_step["action"] == "completed":
@@ -217,5 +240,11 @@ async def submit_answer(
     "teaching": next_step["teaching"],
     "question": next_step["question"],
     "audio_url": audio_url,
+    "avatar_job_id": avatar_job_id,
+    "avatar_status_url": (
+        f"/avatar/status/{avatar_job_id}"
+        if avatar_job_id
+        else None
+    ),
     "state": state.summary(),
 }
