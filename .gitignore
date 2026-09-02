@@ -11,6 +11,8 @@ __pycache__/
 venv/
 env/
 ENV/
+backend/storage/audio/*
+!backend/storage/audio/.gitkeep
 
 # Python environment files
 .env
