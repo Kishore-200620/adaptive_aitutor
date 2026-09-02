@@ -23,11 +23,18 @@ class Settings(BaseSettings):
 
     upload_dir: str = "storage/uploads"
 
+    avatar_provider: str = "simli"
+    avatar_model_id: str = ""
+    avatar_output_dir: str = "storage/video"
+
+    simli_api_key: str = ""
+
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),
         env_file_encoding="utf-8",
         extra="ignore",
     )
+    
 
 
 settings = Settings()

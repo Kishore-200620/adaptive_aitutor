@@ -104,3 +104,4 @@ htmlcov/
 *.key
 credentials.json
 secrets.json
+backend/storage/video/
