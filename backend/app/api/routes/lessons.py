@@ -114,6 +114,7 @@ async def start_lesson(
         avatar_filename,
     )
     # 3. Keep database session aligned with TeacherState
+        # 3. Keep database session aligned with TeacherState
     if concepts:
         learning_service.update_session(
             db=db,
@@ -123,19 +124,19 @@ async def start_lesson(
         )
 
     return {
-    "session_id": session.id,
-    "lesson_id": lesson.id,
-    "student_id": request.student_id,
-    "topic": request.topic,
-    "concept": result["state"].current_concept,
-    "teaching": result["teaching"],
-    "question": result["question"],
-    "audio_url": f"/voice/audio/{audio_filename}",
-    "avatar_job_id": avatar_job_id,
-    "avatar_status_url": f"/avatar/status/{avatar_job_id}",
-    "state": result["state"].summary(),
-}
-
+        "session_id": session.id,
+        "lesson_id": lesson.id,
+        "student_id": request.student_id,
+        "topic": request.topic,
+        "concept": result["state"].current_concept,
+        "teaching": result["teaching"],
+        "question": result["question"],
+        "visual": result["visual"],
+        "audio_url": f"/voice/audio/{audio_filename}",
+        "avatar_job_id": avatar_job_id,
+        "avatar_status_url": f"/avatar/status/{avatar_job_id}",
+        "state": result["state"].summary(),
+    }
 
 @router.post("/next")
 def next_step(
@@ -170,5 +171,6 @@ def next_step(
         "concept": result["concept"],
         "teaching": result["teaching"],
         "question": result["question"],
+        "visual": result["visual"],
         "state": state.summary(),
     }

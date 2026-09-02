@@ -6,7 +6,7 @@ from app.teacher.evaluator import AnswerEvaluator
 from app.teacher.misconception import MisconceptionEngine
 from app.teacher.adaptation import AdaptationEngine
 from app.teacher.graph import ConceptGraph
-
+from app.visuals.router import VisualRouter
 
 class TeacherEngine:
 
@@ -18,6 +18,7 @@ class TeacherEngine:
         self.misconception = MisconceptionEngine()
         self.adaptation = AdaptationEngine()
         self.graph = ConceptGraph()
+        self.visuals = VisualRouter()
     def start(
         self,
         student_id: int,
@@ -55,14 +56,17 @@ class TeacherEngine:
             state,
             question,
         )
-
+        visual = self.visuals.generate(
+            teaching=teaching,
+            concept=state.current_concept,
+        )
         return {
             "state": state,
             "plan": plan,
             "teaching": teaching,
             "question": question,
-        }
-
+            "visual": visual,
+    }
     def answer(
         self,
         state: TeacherState,
@@ -126,14 +130,18 @@ class TeacherEngine:
                 state,
                 question,
             )
-
+            visual = self.visuals.generate(
+                teaching=teaching,
+                concept=state.current_concept,
+            )
             return {
-                "action": "reteach",
-                "concept": state.current_concept,
-                "plan": plan,
-                "teaching": teaching,
-                "question": question,
-            }
+    "action": "reteach",
+    "concept": state.current_concept,
+    "plan": plan,
+    "teaching": teaching,
+    "question": question,
+    "visual": visual,
+}
 
         # Current concept is mastered
         next_concept = self.graph.get_next_concept(state)
@@ -172,11 +180,15 @@ class TeacherEngine:
             state,
             question,
         )
-
+        visual = self.visuals.generate(
+    teaching=teaching,
+    concept=state.current_concept,
+)
         return {
-            "action": "next_concept",
-            "concept": state.current_concept,
-            "plan": plan,
-            "teaching": teaching,
-            "question": question,
-        }
+    "action": "next_concept",
+    "concept": state.current_concept,
+    "plan": plan,
+    "teaching": teaching,
+    "question": question,
+    "visual": visual,
+}

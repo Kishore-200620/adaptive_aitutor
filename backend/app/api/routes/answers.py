@@ -232,19 +232,20 @@ async def submit_answer(
                 step="question",
             )
 
-    return {
-    "session_id": session.id,
-    "evaluation": evaluation.summary(),
-    "action": next_step["action"],
-    "concept": next_step["concept"],
-    "teaching": next_step["teaching"],
-    "question": next_step["question"],
-    "audio_url": audio_url,
-    "avatar_job_id": avatar_job_id,
-    "avatar_status_url": (
-        f"/avatar/status/{avatar_job_id}"
-        if avatar_job_id
-        else None
-    ),
-    "state": state.summary(),
-}
+        return {
+        "session_id": session.id,
+        "evaluation": evaluation.summary(),
+        "action": next_step["action"],
+        "concept": next_step["concept"],
+        "teaching": next_step["teaching"],
+        "question": next_step["question"],
+        "visual": next_step["visual"],
+        "audio_url": audio_url,
+        "avatar_job_id": avatar_job_id,
+        "avatar_status_url": (
+            f"/avatar/status/{avatar_job_id}"
+            if avatar_job_id
+            else None
+        ),
+        "state": state.summary(),
+    }
