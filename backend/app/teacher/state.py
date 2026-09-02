@@ -12,6 +12,7 @@ class TeacherState:
 
     # Learning context
     topic: str
+    language: str = "English"
     current_concept: Optional[str] = None
 
     # Student understanding
@@ -80,6 +81,7 @@ class TeacherState:
         return {
             "student_id": self.student_id,
             "topic": self.topic,
+            "language": self.language,
             "current_concept": self.current_concept,
             "mastery_score": self.mastery_score,
             "difficulty_level": self.difficulty_level,
@@ -87,6 +89,7 @@ class TeacherState:
             "current_phase": self.current_phase,
             "last_question": self.last_question,
             "last_answer": self.last_answer,
+            
             "last_evaluation": self.last_evaluation,
             "misconceptions": self.misconceptions,
             "concepts_completed": self.concepts_completed,

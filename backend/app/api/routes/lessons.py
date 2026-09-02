@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from app.rag.retriever import retrieve_relevant_chunks
@@ -6,7 +6,8 @@ from app.database.connection import get_db
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
-
+from app.voice.tts import TTSService
+from app.models.student import Student
 
 router = APIRouter(
     prefix="/lessons",
@@ -18,6 +19,7 @@ class StartLessonRequest(BaseModel):
     student_id: int
     topic: str
     document_id: int | None = None
+    language: str | None = None
 
 
 class NextStepRequest(BaseModel):
@@ -26,13 +28,37 @@ class NextStepRequest(BaseModel):
 
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
+tts_service = TTSService()
 
+def extract_speech_text(teaching: str) -> str:
+    if not teaching:
+        return ""
+
+    text = teaching
+
+    if "EXPLANATION:" in text:
+        text = text.split("EXPLANATION:", 1)[1]
+
+    if "QUESTION:" in text:
+        text = text.split("QUESTION:", 1)[0]
+
+    return text.strip()
 
 @router.post("/start")
-def start_lesson(
+async def start_lesson(
     request: StartLessonRequest,
     db: Session = Depends(get_db),
 ):
+
+    student = db.get(Student, request.student_id)
+
+    if student is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found",
+        )
+
+    language = request.language or student.preferred_language
 
     # 1. Create persistent lesson + concepts + session
     lesson, concepts, session = learning_service.create_lesson_session(
@@ -57,8 +83,17 @@ def start_lesson(
         student_id=request.student_id,
         topic=request.topic,
         teaching_context=teaching_context,
+        language=language,
     )
+    audio_filename = f"lesson_{session.id}_teacher.mp3"
 
+    speech_text = extract_speech_text(result["teaching"])
+
+    audio_path = await tts_service.generate_speech(
+    text=speech_text,
+    language=language,
+    filename=audio_filename,
+)
     # 3. Keep database session aligned with TeacherState
     if concepts:
         learning_service.update_session(
@@ -69,15 +104,16 @@ def start_lesson(
         )
 
     return {
-        "session_id": session.id,
-        "lesson_id": lesson.id,
-        "student_id": request.student_id,
-        "topic": request.topic,
-        "concept": result["state"].current_concept,
-        "teaching": result["teaching"],
-        "question": result["question"],
-        "state": result["state"].summary(),
-    }
+    "session_id": session.id,
+    "lesson_id": lesson.id,
+    "student_id": request.student_id,
+    "topic": request.topic,
+    "concept": result["state"].current_concept,
+    "teaching": result["teaching"],
+    "question": result["question"],
+    "audio_url": f"/voice/audio/{audio_filename}",
+    "state": result["state"].summary(),
+}
 
 
 @router.post("/next")
@@ -90,6 +126,7 @@ def next_step(
     state = TeacherState(
         student_id=state_data["student_id"],
         topic=state_data["topic"],
+        language=state_data.get("language", "English"),
         current_concept=state_data["current_concept"],
         mastery_score=state_data["mastery_score"],
         difficulty_level=state_data["difficulty_level"],

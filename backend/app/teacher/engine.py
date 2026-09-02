@@ -23,11 +23,13 @@ class TeacherEngine:
         student_id: int,
         topic: str,
         teaching_context: list[str] | None = None,
+        language: str = "English",
     ):
         state = TeacherState(
-            student_id=student_id,
-            topic=topic,
-        )
+    student_id=student_id,
+    topic=topic,
+    language=language,
+)
 
         # 1. Create the lesson plan
         plan = self.planner.create_plan(state)

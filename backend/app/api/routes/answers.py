@@ -8,7 +8,7 @@ from app.models.concept import Concept
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
-
+from app.voice.tts import TTSService
 from app.models.lesson import Lesson
 from app.rag.retriever import retrieve_relevant_chunks
 
@@ -26,10 +26,24 @@ class AnswerRequest(BaseModel):
 
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
+tts_service = TTSService()
 
+def extract_speech_text(teaching: str) -> str:
+    if not teaching:
+        return ""
+
+    text = teaching
+
+    if "EXPLANATION:" in text:
+        text = text.split("EXPLANATION:", 1)[1]
+
+    if "QUESTION:" in text:
+        text = text.split("QUESTION:", 1)[0]
+
+    return text.strip()
 
 @router.post("/answer")
-def submit_answer(
+async def submit_answer(
     request: AnswerRequest,
     db: Session = Depends(get_db),
 ):
@@ -63,6 +77,7 @@ def submit_answer(
     state = TeacherState(
         student_id=state_data["student_id"],
         topic=state_data["topic"],
+        language=state_data.get("language", "English"),
         current_concept=state_data["current_concept"],
         mastery_score=state_data["mastery_score"],
         difficulty_level=state_data["difficulty_level"],
@@ -144,6 +159,25 @@ def submit_answer(
         state,
         teaching_context=teaching_context,
     )
+
+    audio_url = None
+
+    if next_step["teaching"]:
+        audio_filename = (
+            f"lesson_{session.id}_attempt_{state.attempt_count}.mp3"
+        )
+
+        speech_text = extract_speech_text(
+            next_step["teaching"]
+        )
+
+        await tts_service.generate_speech(
+    text=speech_text,
+    language=state.language,
+    filename=audio_filename,
+)
+        audio_url = f"/voice/audio/{audio_filename}"
+
     # 8. Update persistent session
     if next_step["action"] == "completed":
 
@@ -176,11 +210,12 @@ def submit_answer(
             )
 
     return {
-        "session_id": session.id,
-        "evaluation": evaluation.summary(),
-        "action": next_step["action"],
-        "concept": next_step["concept"],
-        "teaching": next_step["teaching"],
-        "question": next_step["question"],
-        "state": state.summary(),
-    }
+    "session_id": session.id,
+    "evaluation": evaluation.summary(),
+    "action": next_step["action"],
+    "concept": next_step["concept"],
+    "teaching": next_step["teaching"],
+    "question": next_step["question"],
+    "audio_url": audio_url,
+    "state": state.summary(),
+}
