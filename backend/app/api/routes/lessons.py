@@ -13,9 +13,6 @@ from app.services.learning_service import LearningService
 from app.voice.tts import TTSService
 from app.models.student import Student
 
-from app.avatar.service import AvatarService
-
-from app.api.routes.avatar import generate_avatar_background
 router = APIRouter(
     prefix="/lessons",
     tags=["Lessons"],
@@ -36,7 +33,7 @@ class NextStepRequest(BaseModel):
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
 tts_service = TTSService()
-avatar_service = AvatarService()
+
 
 def extract_speech_text(teaching: str) -> str:
     if not teaching:
