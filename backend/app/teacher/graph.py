@@ -26,24 +26,18 @@ class ConceptGraph:
         state: TeacherState,
     ) -> str | None:
         """
-        Return the next concept after the current concept.
+        Return the next concept after the current concept from the planned curriculum.
         """
 
-        concepts = self.get_concepts(state.topic)
-
-        if state.current_concept is None:
-            return concepts[0] if concepts else None
-
-        try:
-            current_index = concepts.index(state.current_concept)
-        except ValueError:
-            raise ValueError(
-                f"Unknown concept '{state.current_concept}' "
-                f"for topic '{state.topic}'"
-            )
-        next_index = current_index + 1
-
-        if next_index >= len(concepts):
+        if not state.planned_concepts:
             return None
 
-        return concepts[next_index]
+        if state.current_concept is None:
+            return state.planned_concepts[0]
+
+        next_index = state.current_concept_index + 1
+
+        if next_index >= len(state.planned_concepts):
+            return None
+
+        return state.planned_concepts[next_index]

@@ -1,7 +1,9 @@
+import json
 from dataclasses import dataclass, field
 from typing import List
 
 from app.teacher.state import TeacherState
+from app.ai.groq import groq_service
 
 
 @dataclass
@@ -42,12 +44,16 @@ class LessonPlanner:
 
     def create_plan(self, state: TeacherState) -> LessonPlan:
 
-        concepts = self._get_concepts(state.topic)
+        if not state.planned_concepts:
+            state.planned_concepts = self._get_concepts(state.topic)
+            state.current_concept_index = 0
+
+        concepts = state.planned_concepts
 
         current_concept = state.current_concept
 
         if current_concept is None and concepts:
-            current_concept = concepts[0]
+            current_concept = concepts[state.current_concept_index]
 
         strategy = self._select_strategy(state)
 
@@ -68,17 +74,51 @@ class LessonPlanner:
 
     def _get_concepts(self, topic: str) -> List[str]:
         """
-        Temporary concept sequencing.
-
-        Later this will be replaced/enhanced using:
-        - LLM lesson planning
-        - RAG knowledge
-        - document structure
-        - prerequisite relationships
+        Generates an ordered curriculum of 3-5 subtopics using the LLM.
         """
-
+        prompt = f"""
+You are an expert curriculum designer.
+Generate an ordered list of 3-5 subtopics to teach the topic: "{topic}".
+The subtopics must form a logical pedagogical progression.
+Return ONLY a valid JSON object with a "subtopics" array of strings. Do not include any markdown or other text.
+Example format:
+{{
+  "subtopics": [
+    "Subtopic 1",
+    "Subtopic 2",
+    "Subtopic 3"
+  ]
+}}
+"""
+        try:
+            response = groq_service.generate(prompt)
+            # Clean up potential markdown formatting if the LLM ignores the instruction
+            cleaned = response.strip()
+            if cleaned.startswith("```json"):
+                cleaned = cleaned[7:]
+            if cleaned.startswith("```"):
+                cleaned = cleaned[3:]
+            if cleaned.endswith("```"):
+                cleaned = cleaned[:-3]
+            
+            data = json.loads(cleaned.strip())
+            subtopics = data.get("subtopics", [])
+            
+            if isinstance(subtopics, list) and len(subtopics) > 0:
+                # Filter out empty or duplicate strings
+                seen = set()
+                valid = []
+                for s in subtopics:
+                    if isinstance(s, str) and s.strip() and s.strip() not in seen:
+                        seen.add(s.strip())
+                        valid.append(s.strip())
+                if valid:
+                    return valid[:7] # Bound to a max of 7 to be safe
+        except Exception:
+            pass
+            
+        # Fallback to a hardcoded logic or single topic if LLM fails
         topic_lower = topic.lower()
-
         if "newton" in topic_lower:
             return [
                 "Force",
@@ -88,9 +128,7 @@ class LessonPlanner:
                 "Applications of Newton's Laws",
             ]
 
-        return [
-            topic,
-        ]
+        return [topic]
 
     def _select_strategy(self, state: TeacherState) -> str:
         """

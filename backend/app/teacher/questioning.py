@@ -29,3 +29,4 @@ class QuestioningEngine:
     ):
         state.last_question = question
         state.current_phase = "questioning"
+        state.assessment_active = True

@@ -13,6 +13,8 @@ class TeacherState:
     # Learning context
     topic: str
     language: str = "English"
+    planned_concepts: List[str] = field(default_factory=list)
+    current_concept_index: int = 0
     current_concept: Optional[str] = None
 
     # Student understanding
@@ -23,10 +25,16 @@ class TeacherState:
     teaching_strategy: str = "direct_explanation"
     current_phase: str = "introduction"
 
+    # Phase 38: Teaching Cursor
+    concept_steps_total: int = 2
+    concept_steps_current: int = 1
+    concept_history: List[str] = field(default_factory=list)
+
     # Previous interaction
     last_question: Optional[str] = None
     last_answer: Optional[str] = None
-    last_evaluation: Optional[str] = None
+    # Stored as a dict: {correctness, score, feedback, misconception} or None
+    last_evaluation: Optional[dict] = None
 
     # Detected problems
     misconceptions: List[str] = field(default_factory=list)
@@ -38,6 +46,10 @@ class TeacherState:
     # Lesson control
     needs_reteaching: bool = False
     attempt_count: int = 0
+    assessment_active: bool = False
+
+    # Phase 37: conversational clarification context
+    recent_clarifications: List[dict] = field(default_factory=list)
 
     def update_mastery(self, score: float) -> None:
         """
@@ -82,6 +94,8 @@ class TeacherState:
             "student_id": self.student_id,
             "topic": self.topic,
             "language": self.language,
+            "planned_concepts": self.planned_concepts,
+            "current_concept_index": self.current_concept_index,
             "current_concept": self.current_concept,
             "mastery_score": self.mastery_score,
             "difficulty_level": self.difficulty_level,
@@ -89,11 +103,16 @@ class TeacherState:
             "current_phase": self.current_phase,
             "last_question": self.last_question,
             "last_answer": self.last_answer,
-            
-            "last_evaluation": self.last_evaluation,
+            # last_evaluation is stored as dict or None — always serialize as dict
+            "last_evaluation": self.last_evaluation if isinstance(self.last_evaluation, dict) else None,
             "misconceptions": self.misconceptions,
             "concepts_completed": self.concepts_completed,
             "concepts_struggling": self.concepts_struggling,
             "needs_reteaching": self.needs_reteaching,
             "attempt_count": self.attempt_count,
+            "assessment_active": self.assessment_active,
+            "recent_clarifications": self.recent_clarifications,
+            "concept_steps_total": self.concept_steps_total,
+            "concept_steps_current": self.concept_steps_current,
+            "concept_history": self.concept_history,
         }

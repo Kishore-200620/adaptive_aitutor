@@ -92,29 +92,75 @@ export function MaterialList({ onSelectMaterial, disabled }: MaterialListProps) 
       ) : (
         <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
           {materials.map((mat) => (
-            <div key={mat.document_id} style={{ padding: '0.75rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid #e2e8f0', display: 'flex', flexDirection: 'column', gap: '0.5rem' }}>
-              <div style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                {mat.filename}
-              </div>
-              <button 
-                onClick={() => onSelectMaterial(mat.document_id, mat.filename)}
-                disabled={isUploading || disabled}
-                style={{
-                  padding: '0.25rem 0.5rem',
-                  backgroundColor: 'white',
-                  border: '1px solid var(--primary-color)',
-                  color: 'var(--primary-color)',
-                  borderRadius: 'var(--radius-md)',
-                  fontSize: '0.75rem',
-                  cursor: (isUploading || disabled) ? 'not-allowed' : 'pointer',
-                }}
-              >
-                Select Context
-              </button>
-            </div>
+            <MaterialItem 
+              key={mat.document_id} 
+              mat={mat} 
+              onSelectMaterial={onSelectMaterial} 
+              disabled={isUploading || disabled} 
+            />
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+function MaterialItem({ mat, onSelectMaterial, disabled }: { mat: LocalMaterial, onSelectMaterial: any, disabled: boolean | undefined }) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(event.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    document.addEventListener('mousedown', handleClickOutside);
+    return () => document.removeEventListener('mousedown', handleClickOutside);
+  }, []);
+
+  return (
+    <div style={{ padding: '0.5rem 0.75rem', backgroundColor: '#f8fafc', borderRadius: 'var(--radius-md)', border: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+      <div style={{ fontSize: '0.875rem', fontWeight: 500, color: 'var(--text-primary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', flex: 1, paddingRight: '0.5rem' }}>
+        {mat.filename}
+      </div>
+      <div style={{ position: 'relative' }} ref={menuRef}>
+        <button 
+          onClick={() => setMenuOpen(!menuOpen)}
+          disabled={disabled}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            cursor: disabled ? 'not-allowed' : 'pointer',
+            padding: '0.25rem',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: 'var(--text-secondary)'
+          }}
+        >
+          ⋮
+        </button>
+        {menuOpen && (
+          <div style={{ position: 'absolute', right: 0, top: '100%', marginTop: '0.25rem', backgroundColor: 'white', border: '1px solid var(--border-color)', borderRadius: 'var(--radius-md)', boxShadow: '0 4px 6px -1px rgba(0,0,0,0.1)', zIndex: 10, minWidth: '120px', overflow: 'hidden' }}>
+            <button
+              onClick={() => {
+                onSelectMaterial(mat.document_id, mat.filename);
+                setMenuOpen(false);
+              }}
+              style={{ width: '100%', textAlign: 'left', padding: '0.5rem 0.75rem', background: 'transparent', border: 'none', borderBottom: '1px solid var(--border-color)', cursor: 'pointer', fontSize: '0.875rem', color: 'var(--text-primary)' }}
+            >
+              Select Context
+            </button>
+            <button
+              onClick={() => setMenuOpen(false)}
+              style={{ width: '100%', textAlign: 'left', padding: '0.5rem 0.75rem', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: '0.875rem', color: 'var(--text-secondary)' }}
+            >
+              View Details
+            </button>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

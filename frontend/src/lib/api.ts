@@ -93,3 +93,111 @@ export const eduvaApi = {
     return response.json() as Promise<DocumentUploadResponse>;
   },
 };
+
+export async function fetchApiStream(
+  endpoint: string,
+  options: RequestInit,
+  onChunk: (chunk: string) => void,
+  onComplete: (data: any) => void,
+  onError: (error: Error, hasReceivedData: boolean) => void,
+  onPresentation?: (data: any) => void
+) {
+  const url = `${API_BASE_URL}${endpoint}`;
+  const headers = new Headers(options.headers || {});
+  if (!headers.has('Content-Type')) {
+    headers.set('Content-Type', 'application/json');
+  }
+
+  try {
+    const response = await fetch(url, { ...options, headers });
+    
+    if (!response.ok) {
+      const errorData = await response.json().catch(() => ({}));
+      throw new ApiError(
+        response.status,
+        errorData.detail || `Stream failed with status ${response.status}`
+      );
+    }
+
+    if (!response.body) {
+      throw new Error('ReadableStream not supported by the browser.');
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let hasReceivedData = false;
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+      
+      const parts = buffer.split('\n\n');
+      buffer = parts.pop() || ''; // Keep the incomplete part in the buffer
+
+      for (const part of parts) {
+        if (part.startsWith('data: ')) {
+          const dataStr = part.slice(6);
+          try {
+            const data = JSON.parse(dataStr);
+            if (data.type === 'teaching_chunk') {
+              hasReceivedData = true;
+              onChunk(data.content);
+            } else if (data.type === 'complete') {
+              hasReceivedData = true;
+              onComplete(data.data);
+            } else if (data.type === 'error') {
+              hasReceivedData = true;
+              onError(new Error(data.message), hasReceivedData);
+            } else if (data.type === 'presentation' && onPresentation) {
+              hasReceivedData = true;
+              onPresentation(data.data);
+            }
+          } catch (e) {
+            console.error('Failed to parse SSE event:', part);
+          }
+        }
+      }
+    }
+  } catch (err) {
+    onError(err as Error, false);
+  }
+}
+
+export const eduvaStreamApi = {
+  startLessonStream: (
+    data: StartLessonRequest,
+    onChunk: (chunk: string) => void,
+    onComplete: (data: LessonResponse) => void,
+    onError: (error: Error, hasReceivedData: boolean) => void,
+    onPresentation?: (data: any) => void,
+    signal?: AbortSignal
+  ) =>
+    fetchApiStream(
+      '/lessons/start/stream',
+      { method: 'POST', body: JSON.stringify(data), signal },
+      onChunk,
+      onComplete,
+      onError,
+      onPresentation
+    ),
+
+  submitAnswerStream: (
+    data: AnswerRequest,
+    onChunk: (chunk: string) => void,
+    onComplete: (data: LessonResponse) => void,
+    onError: (error: Error, hasReceivedData: boolean) => void,
+    onPresentation?: (data: any) => void,
+    signal?: AbortSignal
+  ) =>
+    fetchApiStream(
+      '/lessons/answer/stream',
+      { method: 'POST', body: JSON.stringify(data), signal },
+      onChunk,
+      onComplete,
+      onError,
+      onPresentation
+    ),
+};

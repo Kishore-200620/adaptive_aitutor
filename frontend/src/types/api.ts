@@ -2,6 +2,8 @@ export interface TeacherState {
   student_id: number;
   topic: string;
   language: string;
+  planned_concepts: string[];
+  current_concept_index: number;
   current_concept: string | null;
   mastery_score: number;
   difficulty_level: 'beginner' | 'intermediate' | 'advanced';
@@ -17,15 +19,44 @@ export interface TeacherState {
   } | null;
   concepts_completed: string[];
   concepts_struggling: string[];
+  misconceptions: string[];
   needs_reteaching: boolean;
   attempt_count: number;
+  assessment_active: boolean;
+  concept_steps_total?: number;
+  concept_steps_current?: number;
+  concept_history?: any[];
 }
 
-export interface VisualEvent {
-  type: string; // e.g. "blackboard", "concept_map"
+export interface VoiceDecision {
+  enabled: boolean;
+  narration: string;
+}
+
+export interface BlackboardDecision {
+  enabled: boolean;
   content: string;
-  title: string;
-  url?: string | null;
+  visual_type: string;
+  visual_source: string;
+  visual_url: string | null;
+}
+
+export type TeacherVideoTrigger = 'intro' | 'concept_intro' | 'emphasis' | 'transition' | 'encouragement' | 'completion' | 'none';
+
+export interface TeacherVideoDecision {
+  enabled: boolean;
+  trigger: TeacherVideoTrigger;
+  reason: string | null;
+  clip_id: string | null;
+  provider: string | null;
+  url: string | null;
+}
+
+export interface PresentationDecision {
+  mode: 'VOICE_ONLY' | 'VOICE_BLACKBOARD' | 'VOICE_TEACHER_VIDEO' | 'VOICE_BLACKBOARD_TEACHER_VIDEO';
+  voice: VoiceDecision;
+  blackboard: BlackboardDecision;
+  teacher_video: TeacherVideoDecision;
 }
 
 export interface StartLessonRequest {
@@ -55,7 +86,7 @@ export interface LessonResponse {
   concept: string | null;
   teaching: string;
   question: string | null;
-  visual: VisualEvent | null;
+  presentation: PresentationDecision | null;
   audio_url: string | null;
   state: TeacherState;
   evaluation?: {
@@ -64,6 +95,7 @@ export interface LessonResponse {
     feedback: string;
     misconception: string | null;
   }; // Present on answer
+  interaction_type?: 'assessment' | 'clarification';
 }
 
 export interface DocumentUploadResponse {

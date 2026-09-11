@@ -13,6 +13,8 @@ from app.voice.tts import TTSService
 from app.models.student import Student
 from app.models.session import TeachingSession
 from app.models.lesson import Lesson
+from app.visuals.orchestrator import PresentationOrchestrator
+
 router = APIRouter(
     prefix="/lessons",
     tags=["Lessons"],
@@ -37,21 +39,37 @@ class ChangeLanguageRequest(BaseModel):
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
 tts_service = TTSService()
+orchestrator = PresentationOrchestrator()
 
-
-def extract_speech_text(teaching: str) -> str:
+def parse_teaching_response(teaching: str) -> tuple[str, str, str]:
     if not teaching:
-        return ""
-
+        return "", "", ""
+        
+    narration = ""
+    blackboard = ""
+    directive = ""
+    
     text = teaching
-
-    if "EXPLANATION:" in text:
-        text = text.split("EXPLANATION:", 1)[1]
-
+    
     if "QUESTION:" in text:
         text = text.split("QUESTION:", 1)[0]
-
-    return text.strip()
+        
+    if "VISUAL_DIRECTIVE:" in text:
+        parts = text.split("VISUAL_DIRECTIVE:", 1)
+        text = parts[0]
+        directive = parts[1].strip()
+        
+    if "BLACKBOARD:" in text:
+        parts = text.split("BLACKBOARD:", 1)
+        text = parts[0]
+        blackboard = parts[1].strip()
+        
+    if "NARRATION:" in text:
+        narration = text.split("NARRATION:", 1)[1].strip()
+    else:
+        narration = text.strip()
+        
+    return narration, blackboard, directive
 
 @router.post("/start")
 async def start_lesson(
@@ -70,16 +88,20 @@ async def start_lesson(
 
     language = request.language or student.preferred_language
 
-    # 1. Create persistent lesson + concepts + session
-    lesson, concepts, session = learning_service.create_lesson_session(
-    db=db,
-    student_id=request.student_id,
-    topic=request.topic,
-    document_id=request.document_id,
-    language=language,
-)
+    # 1. Plan Curriculum first so DB concepts match exactly
+    planned_concepts = teacher_engine.planner._get_concepts(request.topic)
 
-    # 2. Start AI Teacher
+    # 2. Create persistent lesson + concepts + session
+    lesson, concepts, session = learning_service.create_lesson_session(
+        db=db,
+        student_id=request.student_id,
+        topic=request.topic,
+        planned_concepts=planned_concepts,
+        document_id=request.document_id,
+        language=language,
+    )
+
+    # 3. Start AI Teacher
     teaching_context = None
 
     if request.document_id is not None:
@@ -95,16 +117,32 @@ async def start_lesson(
         topic=request.topic,
         teaching_context=teaching_context,
         language=language,
+        planned_concepts=planned_concepts,
     )
+    
+    # Ensure the engine uses the DB's synced planned concepts!
+    result["state"].planned_concepts = planned_concepts
+    if not result["state"].current_concept:
+        result["state"].current_concept = planned_concepts[0]
     audio_filename = f"lesson_{session.id}_teacher.mp3"
 
-    speech_text = extract_speech_text(result["teaching"])
-
-    audio_path = await tts_service.generate_speech(
-    text=speech_text,
-    language=language,
-    filename=audio_filename,
+    narration, blackboard, directive = parse_teaching_response(result["teaching"])
+    presentation = await orchestrator.orchestrate(
+        teacher_state=result["state"],
+        narration=narration,
+        blackboard_content=blackboard,
+        visual_directive=directive
     )
+
+    audio_path = None
+    if presentation.voice.enabled and presentation.voice.narration:
+        audio_path = await tts_service.generate_speech(
+            text=presentation.voice.narration,
+            language=language,
+            filename=audio_filename,
+        )
+
+    audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
 
     # 3. Keep database session aligned with TeacherState
     if concepts:
@@ -122,9 +160,16 @@ async def start_lesson(
             "concepts_completed": result["state"].concepts_completed,
             "needs_reteaching": result["state"].needs_reteaching,
             "attempt_count": result["state"].attempt_count,
+            "assessment_active": result["state"].assessment_active,
+            "recent_clarifications": result["state"].recent_clarifications,
+            "planned_concepts": result["state"].planned_concepts,
+            "current_concept_index": result["state"].current_concept_index,
+            "concept_steps_total": result["state"].concept_steps_total,
+            "concept_steps_current": result["state"].concept_steps_current,
+            "concept_history": result["state"].concept_history,
             "teaching": result["teaching"],
-            "visual": result["visual"].model_dump() if hasattr(result["visual"], "model_dump") else (result["visual"].dict() if hasattr(result["visual"], "dict") else result["visual"]),
-            "audio_url": f"/voice/audio/{audio_filename}"
+            "presentation": presentation.model_dump(),
+            "audio_url": audio_url
         }
         learning_service.update_session(
             db=db,
@@ -139,13 +184,212 @@ async def start_lesson(
         "lesson_id": lesson.id,
         "student_id": request.student_id,
         "topic": request.topic,
+        "action": "teaching",
         "concept": result["state"].current_concept,
         "teaching": result["teaching"],
         "question": result["question"],
-        "visual": result["visual"],
-        "audio_url": f"/voice/audio/{audio_filename}",
+        "presentation": presentation.model_dump(),
+        "audio_url": audio_url,
         "state": result["state"].summary(),
     }
+
+from fastapi.responses import StreamingResponse
+import json
+import logging
+import time
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("eduva.stream")
+logger.setLevel(logging.INFO)
+
+@router.post("/start/stream")
+async def start_lesson_stream(
+    request: StartLessonRequest,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+):
+    student = db.get(Student, request.student_id)
+    if student is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Student not found",
+        )
+
+    language = request.language or student.preferred_language
+    
+    logger.info("[EDUVA][Latency] REQUEST_START")
+    start_time = time.time()
+    logger.info(f"[EDUVA][Stream] start_lesson_stream request_start for {request.topic}")
+
+    # 1. Plan Curriculum first so DB concepts match exactly
+    logger.info("[EDUVA][Latency] PLANNER_START")
+    planned_concepts = teacher_engine.planner._get_concepts(request.topic)
+    logger.info("[EDUVA][Latency] PLANNER_COMPLETE")
+    
+    # 2. Create persistent lesson + concepts + session
+    lesson, concepts, session = learning_service.create_lesson_session(
+        db=db,
+        student_id=request.student_id,
+        topic=request.topic,
+        planned_concepts=planned_concepts,
+        document_id=request.document_id,
+        language=language,
+    )
+
+    # 3. Start AI Teacher
+    teaching_context = None
+    if request.document_id is not None:
+        logger.info("[EDUVA][Latency] RAG_START")
+        rag_start = time.time()
+        teaching_context = retrieve_relevant_chunks(
+            db=db,
+            question=request.topic,
+            document_id=request.document_id,
+            limit=5,
+        )
+        rag_time = time.time() - rag_start
+        logger.info(f"[EDUVA][Latency] RAG_COMPLETE in {rag_time:.2f}s")
+        logger.info(f"[EDUVA][RAG] retrieval latency: {rag_time:.2f}s")
+
+    async def event_generator():
+        try:
+            # We need to construct the state before streaming to get the presentation
+            pre_state = TeacherState(
+                student_id=request.student_id,
+                topic=request.topic,
+                language=language,
+            )
+            pre_state.planned_concepts = planned_concepts
+            pre_state.current_concept = planned_concepts[0] if planned_concepts else request.topic
+            
+            # Compute a partial presentation (just for video) before stream
+            partial_presentation = await orchestrator.orchestrate(
+                teacher_state=pre_state,
+                narration="",
+                blackboard_content="",
+                visual_directive=None
+            )
+            # Yield early presentation event so UI can mount video immediately
+            yield f"data: {json.dumps({'type': 'presentation', 'data': partial_presentation.model_dump()})}\n\n"
+            
+            gen = await teacher_engine.start_stream(
+                student_id=request.student_id,
+                topic=request.topic,
+                teaching_context=teaching_context,
+                language=language,
+                planned_concepts=planned_concepts,
+            )
+            
+            final_data = None
+            teaching_text = ""
+            
+            logger.info("[EDUVA][Latency] LLM_START")
+            llm_start = time.time()
+            first_token = True
+            
+            async for event in gen:
+                if event["type"] == "teaching_chunk":
+                    if first_token:
+                        logger.info(f"[EDUVA][Latency] LLM_FIRST_TOKEN in {time.time() - llm_start:.2f}s")
+                        first_token = False
+                    teaching_text += event["content"]
+                    yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': event['content']})}\n\n"
+                elif event["type"] == "complete":
+                    final_data = event["data"]
+                    
+            llm_time = time.time() - llm_start
+            logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
+            logger.info(f"[EDUVA][Groq] Full generation latency: {llm_time:.2f}s")
+            
+            logger.info("[EDUVA][Latency] TTS_START")
+            tts_start = time.time()
+            
+            narration, blackboard, directive = parse_teaching_response(teaching_text)
+            presentation = await orchestrator.orchestrate(
+                teacher_state=final_data["state"],
+                narration=narration,
+                blackboard_content=blackboard,
+                visual_directive=directive
+            )
+            
+            audio_filename = f"lesson_{session.id}_teacher.mp3"
+            audio_path = None
+            if presentation.voice.enabled and presentation.voice.narration:
+                audio_path = await tts_service.generate_speech(
+                    text=presentation.voice.narration,
+                    language=language,
+                    filename=audio_filename,
+                )
+            
+            tts_time = time.time() - tts_start
+            logger.info(f"[EDUVA][Latency] TTS_COMPLETE in {tts_time:.2f}s")
+            logger.info(f"[EDUVA][TTS] generation latency: {tts_time:.2f}s")
+            
+            audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
+            
+            logger.info("[EDUVA][Latency] DB_START")
+            db_start = time.time()
+            if concepts:
+                state_data = {
+                    "current_concept": final_data["state"].current_concept,
+                    "mastery_score": final_data["state"].mastery_score,
+                    "difficulty_level": final_data["state"].difficulty_level,
+                    "teaching_strategy": final_data["state"].teaching_strategy,
+                    "current_phase": final_data["state"].current_phase,
+                    "last_question": final_data["state"].last_question,
+                    "last_answer": final_data["state"].last_answer,
+                    "last_evaluation": final_data["state"].last_evaluation,
+                    "misconceptions": final_data["state"].misconceptions,
+                    "concepts_struggling": final_data["state"].concepts_struggling,
+                    "concepts_completed": final_data["state"].concepts_completed,
+                    "needs_reteaching": final_data["state"].needs_reteaching,
+                    "attempt_count": final_data["state"].attempt_count,
+                    "assessment_active": final_data["state"].assessment_active,
+                    "recent_clarifications": final_data["state"].recent_clarifications,
+                    "planned_concepts": final_data["state"].planned_concepts,
+                    "current_concept_index": final_data["state"].current_concept_index,
+                    "concept_steps_total": final_data["state"].concept_steps_total,
+                    "concept_steps_current": final_data["state"].concept_steps_current,
+                    "concept_history": final_data["state"].concept_history,
+                    "teaching": teaching_text,
+                    "presentation": presentation.model_dump(),
+                    "audio_url": audio_url
+                }
+                learning_service.update_session(
+                    db=db,
+                    session=session,
+                    concept_id=concepts[0].id,
+                    step="question",
+                    state_data=state_data
+                )
+            
+            final_response = {
+                "session_id": session.id,
+                "lesson_id": lesson.id,
+                "student_id": request.student_id,
+                "topic": request.topic,
+                "action": "teaching",
+                "concept": final_data["state"].current_concept,
+                "teaching": teaching_text,
+                "question": final_data["question"],
+                "presentation": presentation.model_dump(),
+                "audio_url": audio_url,
+                "state": final_data["state"].summary(),
+            }
+            
+            db_time = time.time() - db_start
+            logger.info(f"[EDUVA][Latency] DB_COMPLETE in {db_time:.2f}s")
+            logger.info(f"[EDUVA][DB] Persistence latency: {db_time:.2f}s")
+            
+            logger.info(f"[EDUVA][Latency] SSE_COMPLETE in {time.time() - start_time:.2f}s")
+            logger.info(f"[EDUVA][Stream] response_complete in {time.time() - start_time:.2f}s")
+            
+            yield f"data: {json.dumps({'type': 'complete', 'data': final_response})}\n\n"
+        except Exception as e:
+            logger.error(f"[EDUVA][Stream] Error in start_lesson_stream: {e}")
+            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @router.post("/next")
 def next_step(
@@ -170,8 +414,15 @@ def next_step(
         misconceptions=state_data["misconceptions"],
         concepts_completed=state_data["concepts_completed"],
         concepts_struggling=state_data["concepts_struggling"],
-        needs_reteaching=state_data["needs_reteaching"],
-        attempt_count=state_data["attempt_count"],
+        needs_reteaching=state_data.get("needs_reteaching", False),
+        attempt_count=state_data.get("attempt_count", 0),
+        assessment_active=state_data.get("assessment_active", False),
+        recent_clarifications=state_data.get("recent_clarifications", []),
+        planned_concepts=state_data.get("planned_concepts", []),
+        current_concept_index=state_data.get("current_concept_index", 0),
+        concept_steps_total=state_data.get("concept_steps_total", 2),
+        concept_steps_current=state_data.get("concept_steps_current", 1),
+        concept_history=state_data.get("concept_history", []),
     )
 
     result = teacher_engine.next_step(state)
@@ -194,6 +445,13 @@ def next_step(
             "concepts_completed": state.concepts_completed,
             "needs_reteaching": state.needs_reteaching,
             "attempt_count": state.attempt_count,
+            "assessment_active": state.assessment_active,
+            "recent_clarifications": state.recent_clarifications,
+            "planned_concepts": state.planned_concepts,
+            "current_concept_index": state.current_concept_index,
+            "concept_steps_total": state.concept_steps_total,
+            "concept_steps_current": state.concept_steps_current,
+            "concept_history": state.concept_history,
             "teaching": result["teaching"],
             "visual": result.get("visual").model_dump() if hasattr(result.get("visual"), "model_dump") else (result.get("visual").dict() if hasattr(result.get("visual"), "dict") else result.get("visual")),
             # Preserve existing avatar/audio since next_step does not generate new ones here
@@ -258,6 +516,13 @@ def recover_session(
         "concepts_struggling": state_data.get("concepts_struggling", []),
         "needs_reteaching": state_data.get("needs_reteaching", False),
         "attempt_count": state_data.get("attempt_count", 0),
+        "assessment_active": state_data.get("assessment_active", False),
+        "recent_clarifications": state_data.get("recent_clarifications", []),
+        "planned_concepts": state_data.get("planned_concepts", []),
+        "current_concept_index": state_data.get("current_concept_index", 0),
+        "concept_steps_total": state_data.get("concept_steps_total", 2),
+        "concept_steps_current": state_data.get("concept_steps_current", 1),
+        "concept_history": state_data.get("concept_history", []),
     }
 
     action = "completed" if session.status == "completed" else "teaching"

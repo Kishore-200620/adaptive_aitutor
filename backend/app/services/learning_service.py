@@ -22,6 +22,7 @@ class LearningService:
         db: Session,
         student_id: int,
         topic: str,
+        planned_concepts: list[str],
         document_id: int | None = None,
         difficulty: str = "beginner",
         language: str = "English",
@@ -40,8 +41,8 @@ class LearningService:
         db.add(lesson)
         db.flush()
 
-        # 2. Create concepts from the existing concept graph
-        concept_names = self.graph.get_concepts(topic)
+        # 2. Create concepts from the provided planned_concepts
+        concept_names = planned_concepts
 
         concepts = []
 

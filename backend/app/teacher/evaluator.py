@@ -123,7 +123,13 @@ Rules:
             misconception = None
 
         state.last_answer = answer
-        state.last_evaluation = correctness
+        # Store full evaluation dict so it round-trips correctly to/from frontend
+        state.last_evaluation = {
+            "correctness": correctness,
+            "score": score,
+            "feedback": feedback,
+            "misconception": misconception,
+        }
         state.update_mastery(score)
 
         return EvaluationResult(

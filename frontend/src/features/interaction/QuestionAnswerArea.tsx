@@ -26,7 +26,7 @@ export function QuestionAnswerArea({ question, onSubmit, disabled }: QuestionAns
         <input 
           type="text"
           className="answer-input"
-          placeholder="Type your answer here..."
+          placeholder="Type your answer or ask a question..."
           value={answer}
           onChange={e => setAnswer(e.target.value)}
           disabled={disabled || !question}
@@ -36,7 +36,7 @@ export function QuestionAnswerArea({ question, onSubmit, disabled }: QuestionAns
           className="btn"
           disabled={disabled || !question || !answer.trim()}
         >
-          Submit Answer
+          Send
         </button>
       </form>
     </div>
