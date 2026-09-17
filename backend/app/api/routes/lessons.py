@@ -1,6 +1,7 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from uuid import uuid4
+import asyncio
 
 
 from sqlalchemy.orm import Session
@@ -9,11 +10,13 @@ from app.database.connection import get_db
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
-from app.voice.tts import TTSService
+from app.visuals.orchestrator import PresentationOrchestrator
+from app.visuals.retriever import get_candidate_visuals
+from app.voice.tts import start_background_speech, tts_service
+from app.voice.chunker import NarrationStreamer, TextChunker
 from app.models.student import Student
 from app.models.session import TeachingSession
 from app.models.lesson import Lesson
-from app.visuals.orchestrator import PresentationOrchestrator
 
 router = APIRouter(
     prefix="/lessons",
@@ -38,38 +41,54 @@ class ChangeLanguageRequest(BaseModel):
 
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
-tts_service = TTSService()
 orchestrator = PresentationOrchestrator()
 
-def parse_teaching_response(teaching: str) -> tuple[str, str, str]:
+def parse_teaching_response(teaching: str) -> tuple[str, str, str, int | None]:
     if not teaching:
-        return "", "", ""
+        return "", "", "", None
         
+    import re
+    
     narration = ""
     blackboard = ""
     directive = ""
+    pdf_visual_id = None
     
-    text = teaching
-    
-    if "QUESTION:" in text:
-        text = text.split("QUESTION:", 1)[0]
+    # Safely extract sections using regex.
+    # We look for the section header (allowing optional markdown ** or *), capture everything until the next known section header or EOF.
+    bb_match = re.search(r'\*?\*?BLACKBOARD:\*?\*?\s*(.*?)(?=\n\*?\*?(?:VISUAL_DIRECTIVE|NARRATION|QUESTION):\*?\*?|$)', teaching, re.DOTALL)
+    if bb_match:
+        blackboard = bb_match.group(1).strip()
         
-    if "VISUAL_DIRECTIVE:" in text:
-        parts = text.split("VISUAL_DIRECTIVE:", 1)
-        text = parts[0]
-        directive = parts[1].strip()
+    vd_match = re.search(r'\*?\*?VISUAL_DIRECTIVE:\*?\*?\s*(.*?)(?=\n\*?\*?(?:BLACKBOARD|NARRATION|QUESTION):\*?\*?|$)', teaching, re.DOTALL)
+    if vd_match:
+        directive = vd_match.group(1).strip()
         
-    if "BLACKBOARD:" in text:
-        parts = text.split("BLACKBOARD:", 1)
-        text = parts[0]
-        blackboard = parts[1].strip()
+    # Check for PDF Visual override globally anywhere in the teaching response
+    pdf_match = re.search(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?(\d+)\]?', teaching, re.IGNORECASE)
+    if pdf_match:
+        pdf_visual_id = int(pdf_match.group(1))
+        # Remove the directive to avoid unwanted image generation, and scrub from blackboard
+        directive = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', directive, flags=re.IGNORECASE).strip()
+        blackboard = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', blackboard, flags=re.IGNORECASE).strip()
         
-    if "NARRATION:" in text:
-        narration = text.split("NARRATION:", 1)[1].strip()
+    narr_match = re.search(r'\*?\*?NARRATION:\*?\*?\s*(.*?)(?=\n\*?\*?(?:BLACKBOARD|VISUAL_DIRECTIVE|QUESTION):\*?\*?|$)', teaching, re.DOTALL)
+    if narr_match:
+        narration = narr_match.group(1).strip()
+        narration = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', narration, flags=re.IGNORECASE).strip()
     else:
-        narration = text.strip()
+        # If no explicit NARRATION, and no blackboard found either, use full text
+        if not blackboard:
+            blackboard = teaching.strip()
+            
+        clean_text = re.sub(r'#+\s*', '', teaching)
+        clean_text = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_text)
+        clean_text = re.sub(r'\*(.*?)\*', r'\1', clean_text)
+        sentences = re.split(r'(?<=[.!?])\s+', clean_text.strip())
+        narration = ' '.join(sentences[:3]) if len(sentences) > 3 else clean_text.strip()
         
-    return narration, blackboard, directive
+    return narration, blackboard, directive, pdf_visual_id
+
 
 @router.post("/start")
 async def start_lesson(
@@ -103,6 +122,7 @@ async def start_lesson(
 
     # 3. Start AI Teacher
     teaching_context = None
+    candidate_visuals = None
 
     if request.document_id is not None:
         teaching_context = retrieve_relevant_chunks(
@@ -111,6 +131,12 @@ async def start_lesson(
             document_id=request.document_id,
             limit=5,
         )
+        candidate_visuals = get_candidate_visuals(
+            db=db,
+            document_id=request.document_id,
+            concept=request.topic,
+            teaching_context=teaching_context
+        )
 
     result = teacher_engine.start(
         student_id=request.student_id,
@@ -118,6 +144,7 @@ async def start_lesson(
         teaching_context=teaching_context,
         language=language,
         planned_concepts=planned_concepts,
+        candidate_visuals=candidate_visuals
     )
     
     # Ensure the engine uses the DB's synced planned concepts!
@@ -126,21 +153,37 @@ async def start_lesson(
         result["state"].current_concept = planned_concepts[0]
     audio_filename = f"lesson_{session.id}_teacher.mp3"
 
-    narration, blackboard, directive = parse_teaching_response(result["teaching"])
+    narration, blackboard, directive, pdf_visual_id = parse_teaching_response(result["teaching"])
+    
+    pdf_visual_data = None
+    if pdf_visual_id and candidate_visuals:
+        # Validate LLM selected ID against provided candidates
+        valid_ids = [v.get("id") for v in candidate_visuals]
+        if pdf_visual_id in valid_ids:
+            from app.models.document_visual import DocumentVisual
+            db_visual = db.get(DocumentVisual, pdf_visual_id)
+            if db_visual:
+                pdf_visual_data = db_visual.to_dict()
+        else:
+            logger.warning(f"LLM provided invalid USE_PDF_VISUAL ID: {pdf_visual_id}")
+            
     presentation = await orchestrator.orchestrate(
         teacher_state=result["state"],
         narration=narration,
         blackboard_content=blackboard,
-        visual_directive=directive
+        visual_directive=directive,
+        pdf_visual_data=pdf_visual_data
     )
 
     audio_path = None
     if presentation.voice.enabled and presentation.voice.narration:
-        audio_path = await tts_service.generate_speech(
+        tts_service.job_status[audio_filename] = "pending"
+        start_background_speech(
             text=presentation.voice.narration,
             language=language,
             filename=audio_filename,
         )
+        audio_path = audio_filename
 
     audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
 
@@ -238,6 +281,7 @@ async def start_lesson_stream(
 
     # 3. Start AI Teacher
     teaching_context = None
+    candidate_visuals = None
     if request.document_id is not None:
         logger.info("[EDUVA][Latency] RAG_START")
         rag_start = time.time()
@@ -246,6 +290,12 @@ async def start_lesson_stream(
             question=request.topic,
             document_id=request.document_id,
             limit=5,
+        )
+        candidate_visuals = get_candidate_visuals(
+            db=db,
+            document_id=request.document_id,
+            concept=request.topic,
+            teaching_context=teaching_context
         )
         rag_time = time.time() - rag_start
         logger.info(f"[EDUVA][Latency] RAG_COMPLETE in {rag_time:.2f}s")
@@ -278,6 +328,7 @@ async def start_lesson_stream(
                 teaching_context=teaching_context,
                 language=language,
                 planned_concepts=planned_concepts,
+                candidate_visuals=candidate_visuals
             )
             
             final_data = None
@@ -287,6 +338,11 @@ async def start_lesson_stream(
             llm_start = time.time()
             first_token = True
             
+            narration_streamer = NarrationStreamer()
+            text_chunker = TextChunker()
+            chunk_index = 0
+            event_id = f"lesson_{session.id}_event_{uuid4().hex[:8]}"
+            
             async for event in gen:
                 if event["type"] == "teaching_chunk":
                     if first_token:
@@ -294,38 +350,82 @@ async def start_lesson_stream(
                         first_token = False
                     teaching_text += event["content"]
                     yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': event['content']})}\n\n"
+                    
+                    # Streaming TTS chunking
+                    new_narr = narration_streamer.feed(event["content"])
+                    if new_narr:
+                        chunks = text_chunker.feed(new_narr)
+                        for chunk in chunks:
+                            chunk_filename = f"{event_id}_{chunk_index}.mp3"
+                            start_background_speech(chunk, language, chunk_filename)
+                            
+                            unit_data = {
+                                'type': 'presentation_unit',
+                                'event_id': event_id,
+                                'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                                'sequence': chunk_index,
+                                'text': chunk,
+                                'audio_url': f'/voice/audio/{chunk_filename}',
+                                'status': 'pending'
+                            }
+                            yield f"data: {json.dumps(unit_data)}\n\n"
+                            chunk_index += 1
+                            
                 elif event["type"] == "complete":
                     final_data = event["data"]
+                    
+            # Flush remaining chunks
+            new_narr = narration_streamer.flush()
+            if new_narr:
+                chunks = text_chunker.feed(new_narr)
+                chunks.extend(text_chunker.flush())
+            else:
+                chunks = text_chunker.flush()
+                
+            for chunk in chunks:
+                chunk_filename = f"{event_id}_{chunk_index}.mp3"
+                start_background_speech(chunk, language, chunk_filename)
+                unit_data = {
+                    'type': 'presentation_unit',
+                    'event_id': event_id,
+                    'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                    'sequence': chunk_index,
+                    'text': chunk,
+                    'audio_url': f'/voice/audio/{chunk_filename}',
+                    'status': 'pending'
+                }
+                yield f"data: {json.dumps(unit_data)}\n\n"
+                chunk_index += 1
                     
             llm_time = time.time() - llm_start
             logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
             logger.info(f"[EDUVA][Groq] Full generation latency: {llm_time:.2f}s")
             
-            logger.info("[EDUVA][Latency] TTS_START")
-            tts_start = time.time()
+            narration, blackboard, directive, pdf_visual_id = parse_teaching_response(teaching_text)
             
-            narration, blackboard, directive = parse_teaching_response(teaching_text)
+            pdf_visual_data = None
+            if pdf_visual_id and candidate_visuals:
+                # Validate LLM selected ID against provided candidates
+                valid_ids = [v.get("id") for v in candidate_visuals]
+                if pdf_visual_id in valid_ids:
+                    from app.models.document_visual import DocumentVisual
+                    db_visual = db.get(DocumentVisual, pdf_visual_id)
+                    if db_visual:
+                        pdf_visual_data = db_visual.to_dict()
+                else:
+                    logger.warning(f"LLM provided invalid USE_PDF_VISUAL ID: {pdf_visual_id}")
+            
+            # Since final_data is dictionary and state is also a dictionary here:
+            state_dict_or_obj = final_data.get("state") if final_data else {}
             presentation = await orchestrator.orchestrate(
-                teacher_state=final_data["state"],
+                teacher_state=state_dict_or_obj,
                 narration=narration,
                 blackboard_content=blackboard,
-                visual_directive=directive
+                visual_directive=directive,
+                pdf_visual_data=pdf_visual_data
             )
             
-            audio_filename = f"lesson_{session.id}_teacher.mp3"
-            audio_path = None
-            if presentation.voice.enabled and presentation.voice.narration:
-                audio_path = await tts_service.generate_speech(
-                    text=presentation.voice.narration,
-                    language=language,
-                    filename=audio_filename,
-                )
-            
-            tts_time = time.time() - tts_start
-            logger.info(f"[EDUVA][Latency] TTS_COMPLETE in {tts_time:.2f}s")
-            logger.info(f"[EDUVA][TTS] generation latency: {tts_time:.2f}s")
-            
-            audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
+            audio_url = None
             
             logger.info("[EDUVA][Latency] DB_START")
             db_start = time.time()
@@ -423,11 +523,29 @@ def next_step(
         concept_steps_total=state_data.get("concept_steps_total", 2),
         concept_steps_current=state_data.get("concept_steps_current", 1),
         concept_history=state_data.get("concept_history", []),
+        teaching_cursor=state_data.get("teaching_cursor", None),
     )
 
-    result = teacher_engine.next_step(state)
-
     session = db.get(TeachingSession, request.session_id)
+    candidate_visuals = None
+    if session:
+        lesson = db.get(Lesson, session.lesson_id)
+        if lesson and lesson.document_id:
+            teaching_context = retrieve_relevant_chunks(
+                db=db,
+                question=state.current_concept,
+                document_id=lesson.document_id,
+                limit=5,
+            )
+            candidate_visuals = get_candidate_visuals(
+                db=db,
+                document_id=lesson.document_id,
+                concept=state.current_concept,
+                teaching_context=teaching_context
+            )
+
+    result = teacher_engine.next_step(state, candidate_visuals=candidate_visuals)
+
     if session:
         # Note: next_step doesn't generate audio/avatar in the current route, only answer() and start() do.
         # But we still persist the teaching content so the client can resume correctly.
@@ -523,6 +641,7 @@ def recover_session(
         "concept_steps_total": state_data.get("concept_steps_total", 2),
         "concept_steps_current": state_data.get("concept_steps_current", 1),
         "concept_history": state_data.get("concept_history", []),
+        "teaching_cursor": state_data.get("teaching_cursor", None),
     }
 
     action = "completed" if session.status == "completed" else "teaching"
@@ -603,7 +722,8 @@ async def change_language(
         speech_text = extract_speech_text(translated_teaching)
         audio_filename = f"lesson_{session.id}_teacher_{request.language}.mp3"
         
-        audio_path = await tts_service.generate_speech(
+        tts_service.job_status[audio_filename] = "pending"
+        start_background_speech(
             text=speech_text,
             language=request.language,
             filename=audio_filename,

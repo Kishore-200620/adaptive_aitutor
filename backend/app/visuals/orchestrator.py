@@ -24,7 +24,8 @@ class PresentationOrchestrator:
         teacher_state: TeacherState,
         narration: str,
         blackboard_content: str,
-        visual_directive: Optional[str] = None
+        visual_directive: Optional[str] = None,
+        pdf_visual_data: Optional[dict] = None
     ) -> PresentationDecision:
         """
         Takes the parsed outputs from the Teacher Brain and decides the presentation layer.
@@ -49,9 +50,29 @@ class PresentationOrchestrator:
         bb_content = blackboard_content if blackboard_content else (visual_event.content if visual_event else "")
         bb_url = visual_event.url if visual_event else None
         bb_source = "pdf_image" if bb_url else "text"
+        
+        pdf_visual_metadata = None
 
+        # If a PDF visual was explicitly selected, prioritize it
+        if pdf_visual_data:
+            from app.schemas.presentation import PdfVisualMetadata
+            # visual_id mapping to the expected schema
+            metadata_dict = {
+                "visual_id": pdf_visual_data.get("id"),
+                "document_id": pdf_visual_data.get("document_id"),
+                "page_number": pdf_visual_data.get("page_number"),
+                "visual_type": pdf_visual_data.get("visual_type"),
+                "asset_url": pdf_visual_data.get("asset_url"),
+                "caption": pdf_visual_data.get("caption"),
+                "metadata": pdf_visual_data.get("metadata", {})
+            }
+            pdf_visual_metadata = PdfVisualMetadata(**metadata_dict)
+            bb_url = pdf_visual_metadata.asset_url
+            bb_source = "pdf_visual"
+            bb_type = "image"
+            blackboard_enabled = True
         # If visual directive exists and we don't have a PDF URL, generate image
-        if visual_directive and not bb_url:
+        elif visual_directive and not bb_url:
             generated_url = await self.image_service.generate_image(visual_directive)
             if generated_url:
                 bb_url = generated_url
@@ -64,7 +85,8 @@ class PresentationOrchestrator:
             content=bb_content,
             visual_type=bb_type,
             visual_source=bb_source,
-            visual_url=bb_url
+            visual_url=bb_url,
+            pdf_visual=pdf_visual_metadata
         )
 
         # 3. Teacher Video

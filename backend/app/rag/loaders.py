@@ -18,7 +18,9 @@ def load_pdf(file_path: str, document_id: int | None = None) -> str:
         static_dir.mkdir(parents=True, exist_ok=True)
 
     for i, page in enumerate(reader.pages):
+        page_number = i + 1
         text = page.extract_text() or ""
+        text = f"\n[PAGE {page_number}]\n" + text
         
         # Extract images if document_id is provided
         if document_id is not None and static_dir is not None:

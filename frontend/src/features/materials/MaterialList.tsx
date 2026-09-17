@@ -5,10 +5,11 @@ import type { LocalMaterial } from '../../lib/storage';
 
 interface MaterialListProps {
   onSelectMaterial: (documentId: number, filename: string) => void;
+  studentId: number;
   disabled?: boolean;
 }
 
-export function MaterialList({ onSelectMaterial, disabled }: MaterialListProps) {
+export function MaterialList({ onSelectMaterial, disabled, studentId }: MaterialListProps) {
   const [materials, setMaterials] = useState<LocalMaterial[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -31,7 +32,7 @@ export function MaterialList({ onSelectMaterial, disabled }: MaterialListProps) 
     setError(null);
 
     try {
-      const response = await eduvaApi.uploadDocument(file);
+      const response = await eduvaApi.uploadDocument(file, studentId);
       const newMaterial: LocalMaterial = {
         document_id: response.document_id,
         filename: response.filename,

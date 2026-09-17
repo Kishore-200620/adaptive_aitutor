@@ -2,8 +2,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from uuid import uuid4
-
-
+import asyncio
 
 from app.database.connection import get_db
 from app.models.session import TeachingSession
@@ -11,11 +10,12 @@ from app.models.concept import Concept
 from app.teacher.engine import TeacherEngine
 from app.teacher.state import TeacherState
 from app.services.learning_service import LearningService
-from app.voice.tts import TTSService
+from app.visuals.orchestrator import PresentationOrchestrator
+from app.voice.tts import tts_service, start_background_speech
+from app.voice.chunker import NarrationStreamer, TextChunker
 from app.models.lesson import Lesson
 from app.models.student import Student
 from app.rag.retriever import retrieve_relevant_chunks
-from app.visuals.orchestrator import PresentationOrchestrator
 
 router = APIRouter(
     prefix="/lessons",
@@ -31,7 +31,7 @@ class AnswerRequest(BaseModel):
 
 teacher_engine = TeacherEngine()
 learning_service = LearningService()
-tts_service = TTSService()
+
 orchestrator = PresentationOrchestrator()
 
 def parse_teaching_response(teaching: str) -> tuple[str, str, str]:
@@ -60,7 +60,16 @@ def parse_teaching_response(teaching: str) -> tuple[str, str, str]:
     if "NARRATION:" in text:
         narration = text.split("NARRATION:", 1)[1].strip()
     else:
-        narration = text.strip()
+        # If no explicit NARRATION, use full text for blackboard
+        if not blackboard:
+            blackboard = text.strip()
+            
+        import re
+        clean_text = re.sub(r'#+\s*', '', text)
+        clean_text = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_text)
+        clean_text = re.sub(r'\*(.*?)\*', r'\1', clean_text)
+        sentences = re.split(r'(?<=[.!?])\s+', clean_text.strip())
+        narration = ' '.join(sentences[:3]) if len(sentences) > 3 else clean_text.strip()
         
     return narration, blackboard, directive
 
@@ -121,6 +130,7 @@ async def submit_answer(
         concept_history=state_data.get("concept_history", []),
         planned_concepts=state_data.get("planned_concepts", []),
         current_concept_index=state_data.get("current_concept_index", 0),
+        teaching_cursor=state_data.get("teaching_cursor", None),
     )
 
     interaction_type = teacher_engine.classify_intent(state, request.answer)
@@ -172,13 +182,13 @@ async def submit_answer(
         audio_url = None
         if presentation.voice.enabled and presentation.voice.narration:
             audio_filename = f"lesson_{session.id}_clarification_{uuid4().hex[:8]}.mp3"
-            audio_path = await tts_service.generate_speech(
+            tts_service.job_status[audio_filename] = "pending"
+            start_background_speech(
                 text=presentation.voice.narration,
                 language=state.language,
                 filename=audio_filename,
             )
-            if audio_path:
-                audio_url = f"/voice/audio/{audio_filename}"
+            audio_url = f"/voice/audio/{audio_filename}"
 
         state.recent_clarifications.append({"role": "user", "content": request.answer})
         state.recent_clarifications.append({"role": "assistant", "content": clarification_text})
@@ -224,13 +234,13 @@ async def submit_answer(
         audio_url = None
         if presentation.voice.enabled and presentation.voice.narration:
             audio_filename = f"lesson_{session.id}_continue_{uuid4().hex[:8]}.mp3"
-            audio_path = await tts_service.generate_speech(
+            tts_service.job_status[audio_filename] = "pending"
+            start_background_speech(
                 text=presentation.voice.narration,
                 language=state.language,
                 filename=audio_filename,
             )
-            if audio_path:
-                audio_url = f"/voice/audio/{audio_filename}"
+            audio_url = f"/voice/audio/{audio_filename}"
                 
         learning_service.update_session(
             db=db,
@@ -341,13 +351,13 @@ async def submit_answer(
         presentation_dict = presentation.model_dump()
 
         if presentation.voice.enabled and presentation.voice.narration:
-            audio_path = await tts_service.generate_speech(
+            tts_service.job_status[audio_filename] = "pending"
+            start_background_speech(
                 text=presentation.voice.narration,
                 language=state.language,
                 filename=audio_filename,
             )
-            if audio_path:
-                audio_url = f"/voice/audio/{audio_filename}"
+            audio_url = f"/voice/audio/{audio_filename}"
 
     # 8. Update persistent session
     
@@ -488,6 +498,7 @@ async def submit_answer_stream(
         concept_history=state_data.get("concept_history", []),
         planned_concepts=state_data.get("planned_concepts", []),
         current_concept_index=state_data.get("current_concept_index", 0),
+        teaching_cursor=state_data.get("teaching_cursor", None),
     )
 
     language = state.language or student.preferred_language
@@ -555,6 +566,11 @@ async def submit_answer_stream(
                 llm_start = time.time()
                 first_token = True
                 
+                narration_streamer = NarrationStreamer()
+                text_chunker = TextChunker()
+                chunk_index = 0
+                event_id = f"lesson_{session.id}_event_{uuid4().hex[:8]}"
+                
                 async for event in gen:
                     if event["type"] == "teaching_chunk":
                         if first_token:
@@ -562,14 +578,54 @@ async def submit_answer_stream(
                             first_token = False
                         teaching_text += event["content"]
                         yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': event['content']})}\n\n"
+                        
+                        # Streaming TTS chunking
+                        new_narr = narration_streamer.feed(event["content"])
+                        if new_narr:
+                            chunks = text_chunker.feed(new_narr)
+                            for chunk in chunks:
+                                chunk_filename = f"{event_id}_{chunk_index}.mp3"
+                                start_background_speech(chunk, language, chunk_filename)
+                                unit_data = {
+                                    'type': 'presentation_unit',
+                                    'event_id': event_id,
+                                    'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                                    'sequence': chunk_index,
+                                    'text': chunk,
+                                    'audio_url': f'/voice/audio/{chunk_filename}',
+                                    'status': 'pending'
+                                }
+                                yield f"data: {json.dumps(unit_data)}\n\n"
+                                chunk_index += 1
+                                
                     elif event["type"] == "complete":
                         final_data = event["data"]
                         
+                # Flush remaining chunks
+                new_narr = narration_streamer.flush()
+                if new_narr:
+                    chunks = text_chunker.feed(new_narr)
+                    chunks.extend(text_chunker.flush())
+                else:
+                    chunks = text_chunker.flush()
+                    
+                for chunk in chunks:
+                    chunk_filename = f"{event_id}_{chunk_index}.mp3"
+                    start_background_speech(chunk, language, chunk_filename)
+                    unit_data = {
+                        'type': 'presentation_unit',
+                        'event_id': event_id,
+                        'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                        'sequence': chunk_index,
+                        'text': chunk,
+                        'audio_url': f'/voice/audio/{chunk_filename}',
+                        'status': 'pending'
+                    }
+                    yield f"data: {json.dumps(unit_data)}\n\n"
+                    chunk_index += 1
+                        
                 llm_time = time.time() - llm_start
                 logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
-                
-                logger.info("[EDUVA][Latency] TTS_START")
-                tts_start = time.time()
                 
                 narration, blackboard, directive = parse_teaching_response(teaching_text)
                 presentation = await orchestrator.orchestrate(
@@ -580,19 +636,7 @@ async def submit_answer_stream(
                 )
                 presentation_dict = presentation.model_dump()
                 
-                audio_filename = f"lesson_{session.id}_clarification_{uuid4().hex[:8]}.mp3"
-                audio_path = None
-                if presentation.voice.enabled and presentation.voice.narration:
-                    audio_path = await tts_service.generate_speech(
-                        text=presentation.voice.narration,
-                        language=language,
-                        filename=audio_filename,
-                    )
-                    
-                tts_time = time.time() - tts_start
-                logger.info(f"[EDUVA][Latency] TTS_COMPLETE in {tts_time:.2f}s")
-                
-                audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
+                audio_url = None # We stream chunks now, so final url is None
                 
                 final_response = {
                     "session_id": session.id,
@@ -649,6 +693,11 @@ async def submit_answer_stream(
                 llm_start = time.time()
                 first_token = True
                 
+                narration_streamer = NarrationStreamer()
+                text_chunker = TextChunker()
+                chunk_index = 0
+                event_id = f"lesson_{session.id}_event_{uuid4().hex[:8]}"
+                
                 async for event in gen:
                     if event["type"] == "teaching_chunk":
                         if first_token:
@@ -656,14 +705,51 @@ async def submit_answer_stream(
                             first_token = False
                         teaching_text += event["content"]
                         yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': event['content']})}\n\n"
+                        
+                        # Streaming TTS chunking
+                        new_narr = narration_streamer.feed(event["content"])
+                        if new_narr:
+                            chunks = text_chunker.feed(new_narr)
+                            for chunk in chunks:
+                                chunk_filename = f"lesson_{session.id}_continue_{uuid4().hex[:8]}_{chunk_index}.mp3"
+                                start_background_speech(chunk, language, chunk_filename)
+                                unit_data = {
+                                    'type': 'presentation_unit',
+                                    'event_id': event_id,
+                                    'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                                    'sequence': chunk_index,
+                                    'text': chunk,
+                                    'audio_url': f'/voice/audio/{chunk_filename}',
+                                    'status': 'pending'
+                                }
+                                yield f"data: {json.dumps(unit_data)}\n\n"
+                                chunk_index += 1
+                                
                     elif event["type"] == "complete":
                         final_data = event["data"]
                         
+                # Flush remaining chunks
+                new_narr = narration_streamer.flush()
+                if new_narr:
+                    chunks = text_chunker.feed(new_narr)
+                    chunks.extend(text_chunker.flush())
+                    for chunk in chunks:
+                        chunk_filename = f"lesson_{session.id}_continue_{uuid4().hex[:8]}_{chunk_index}.mp3"
+                        start_background_speech(chunk, language, chunk_filename)
+                        unit_data = {
+                            'type': 'presentation_unit',
+                            'event_id': event_id,
+                            'chunk_id': f"{event_id}_chunk_{chunk_index}",
+                            'sequence': chunk_index,
+                            'text': chunk,
+                            'audio_url': f'/voice/audio/{chunk_filename}',
+                            'status': 'pending'
+                        }
+                        yield f"data: {json.dumps(unit_data)}\n\n"
+                        chunk_index += 1
+                        
                 llm_time = time.time() - llm_start
                 logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
-                
-                logger.info("[EDUVA][Latency] TTS_START")
-                tts_start = time.time()
                 
                 narration, blackboard, directive = parse_teaching_response(teaching_text)
                 presentation = await orchestrator.orchestrate(
@@ -674,19 +760,7 @@ async def submit_answer_stream(
                 )
                 presentation_dict = presentation.model_dump()
                 
-                audio_filename = f"lesson_{session.id}_continue_{uuid4().hex[:8]}.mp3"
-                audio_path = None
-                if presentation.voice.enabled and presentation.voice.narration:
-                    audio_path = await tts_service.generate_speech(
-                        text=presentation.voice.narration,
-                        language=language,
-                        filename=audio_filename,
-                    )
-                    
-                tts_time = time.time() - tts_start
-                logger.info(f"[EDUVA][Latency] TTS_COMPLETE in {tts_time:.2f}s")
-                
-                audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
+                audio_url = None
                 
                 final_response = {
                     "session_id": session.id,
@@ -769,6 +843,10 @@ async def submit_answer_stream(
             llm_start = time.time()
             first_token = True
             
+            narration_streamer = NarrationStreamer()
+            text_chunker = TextChunker()
+            chunk_index = 0
+            
             async for event in gen:
                 if event["type"] == "teaching_chunk":
                     if first_token:
@@ -776,15 +854,34 @@ async def submit_answer_stream(
                         first_token = False
                     teaching_text += event["content"]
                     yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': event['content']})}\n\n"
+                    
+                    # Streaming TTS chunking
+                    new_narr = narration_streamer.feed(event["content"])
+                    if new_narr:
+                        chunks = text_chunker.feed(new_narr)
+                        for chunk in chunks:
+                            chunk_filename = f"lesson_{session.id}_answer_{state.attempt_count}_{uuid4().hex[:8]}_{chunk_index}.mp3"
+                            start_background_speech(chunk, language, chunk_filename)
+                            yield f"data: {json.dumps({'type': 'audio_chunk', 'url': f'/voice/audio/{chunk_filename}'})}\n\n"
+                            chunk_index += 1
+                            
                 elif event["type"] == "complete":
                     final_data = event["data"]
+                    
+            # Flush remaining chunks
+            new_narr = narration_streamer.flush()
+            if new_narr:
+                chunks = text_chunker.feed(new_narr)
+                chunks.extend(text_chunker.flush())
+                for chunk in chunks:
+                    chunk_filename = f"lesson_{session.id}_answer_{state.attempt_count}_{uuid4().hex[:8]}_{chunk_index}.mp3"
+                    start_background_speech(chunk, language, chunk_filename)
+                    yield f"data: {json.dumps({'type': 'audio_chunk', 'url': f'/voice/audio/{chunk_filename}'})}\n\n"
+                    chunk_index += 1
                     
             llm_time = time.time() - llm_start
             logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
             logger.info(f"[EDUVA][Groq] Full generation latency: {llm_time:.2f}s")
-            
-            logger.info("[EDUVA][Latency] TTS_START")
-            tts_start = time.time()
             
             narration, blackboard, directive = parse_teaching_response(teaching_text)
             presentation = await orchestrator.orchestrate(
@@ -795,20 +892,7 @@ async def submit_answer_stream(
             )
             presentation_dict = presentation.model_dump()
             
-            audio_filename = f"lesson_{session.id}_answer_{state.attempt_count}.mp3"
-            audio_path = None
-            if presentation.voice.enabled and presentation.voice.narration:
-                audio_path = await tts_service.generate_speech(
-                    text=presentation.voice.narration,
-                    language=language,
-                    filename=audio_filename,
-                )
-                
-            tts_time = time.time() - tts_start
-            logger.info(f"[EDUVA][Latency] TTS_COMPLETE in {tts_time:.2f}s")
-            logger.info(f"[EDUVA][TTS] generation latency: {tts_time:.2f}s")
-            
-            audio_url = f"/voice/audio/{audio_filename}" if audio_path else None
+            audio_url = None
             
             logger.info("[EDUVA][Latency] DB_START")
             db_start = time.time()

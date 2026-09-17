@@ -29,6 +29,7 @@ class TeacherState:
     concept_steps_total: int = 2
     concept_steps_current: int = 1
     concept_history: List[str] = field(default_factory=list)
+    teaching_cursor: Optional[dict] = None
 
     # Previous interaction
     last_question: Optional[str] = None
@@ -115,4 +116,70 @@ class TeacherState:
             "concept_steps_total": self.concept_steps_total,
             "concept_steps_current": self.concept_steps_current,
             "concept_history": self.concept_history,
+            "teaching_cursor": self.get_or_create_cursor(),
         }
+
+    def get_or_create_cursor(self) -> dict:
+        """
+        Returns the canonical teaching cursor. Derives it from current state 
+        if it does not exist (for backward compatibility).
+        """
+        if self.teaching_cursor is not None:
+            return self.teaching_cursor
+            
+        cursor = {
+            "concept_index": self.current_concept_index,
+            "concept_name": self.current_concept,
+            "step": self.concept_steps_current,
+            "total_steps": self.concept_steps_total,
+            "phase": self.current_phase,
+            "next_expected_action": "answer" if self.assessment_active else "continue" if self.concept_steps_current < self.concept_steps_total else "clarification",
+            "awaiting_student_input": self.assessment_active or (self.concept_steps_current < self.concept_steps_total),
+            "awaiting_assessment_answer": self.assessment_active,
+            "in_reteach": self.needs_reteaching,
+            "interrupted_by_clarification": False,
+            "resume_cursor": None
+        }
+        self.teaching_cursor = cursor
+        return cursor
+        
+    def sync_cursor(self) -> None:
+        """Synchronizes the canonical cursor with the current state fields."""
+        cursor = {
+            "concept_index": self.current_concept_index,
+            "concept_name": self.current_concept,
+            "step": self.concept_steps_current,
+            "total_steps": self.concept_steps_total,
+            "phase": self.current_phase,
+            "next_expected_action": "answer" if self.assessment_active else "continue" if self.concept_steps_current < self.concept_steps_total else "clarification",
+            "awaiting_student_input": self.assessment_active or (self.concept_steps_current < self.concept_steps_total),
+            "awaiting_assessment_answer": self.assessment_active,
+            "in_reteach": self.needs_reteaching,
+            "interrupted_by_clarification": False,
+            "resume_cursor": None
+        }
+        self.teaching_cursor = cursor
+
+    def update_cursor(self, updates: dict) -> None:
+        """Updates specific fields in the canonical teaching cursor."""
+        cursor = self.get_or_create_cursor()
+        cursor.update(updates)
+        self.teaching_cursor = cursor
+        
+    def pause_cursor_for_clarification(self) -> None:
+        """Preserves current position before answering a clarification."""
+        cursor = self.get_or_create_cursor()
+        if not cursor.get("interrupted_by_clarification"):
+            # Store copy of current state to resume
+            resume_state = cursor.copy()
+            # Mark as interrupted
+            cursor["interrupted_by_clarification"] = True
+            cursor["resume_cursor"] = resume_state
+            self.teaching_cursor = cursor
+
+    def resume_cursor_after_clarification(self) -> None:
+        """Restores position after a clarification is resolved."""
+        cursor = self.get_or_create_cursor()
+        if cursor.get("interrupted_by_clarification") and cursor.get("resume_cursor"):
+            # Restore to the pre-clarification state
+            self.teaching_cursor = cursor["resume_cursor"]

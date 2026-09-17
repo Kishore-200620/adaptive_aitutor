@@ -8,6 +8,7 @@ from app.api.routes.assessments import router as assessments_router
 from app.api.routes.progress import router as progress_router
 from app.api.routes.voice import router as voice_router
 from app.api.routes.avatar import router as avatar_router
+from app.api.routes.students import router as students_router
 from pathlib import Path
 
 app = FastAPI(
@@ -37,6 +38,7 @@ app.include_router(assessments_router)
 app.include_router(progress_router)
 app.include_router(voice_router)
 app.include_router(avatar_router)
+app.include_router(students_router)
 
 static_dir = Path(__file__).parent.parent / "static"
 if static_dir.exists():

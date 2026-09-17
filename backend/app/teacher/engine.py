@@ -74,6 +74,7 @@ CLARIFICATION
             return "clarification"  # Safe fallback
 
     def clarify(self, state: TeacherState, message: str, context: list[str] | None = None) -> str:
+        state.pause_cursor_for_clarification()
         context_text = "\n\n".join(context) if context else "No reference material provided."
         
         recent_context = ""
@@ -116,20 +117,21 @@ Provide a helpful, conversational response addressing the student's clarificatio
 
 Return exactly in this format:
 
-NARRATION:
-<The spoken, conversational explanation>
-
 BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
 <Optional instructions for generating an educational image. Leave blank if not needed.>
+
+NARRATION:
+<The spoken, conversational explanation>
 
 {question_output}
 """
         return groq_service.generate(prompt)
 
     async def clarify_stream(self, state: TeacherState, message: str, context: list[str] | None = None):
+        state.pause_cursor_for_clarification()
         context_text = "\n\n".join(context) if context else "No reference material provided."
         
         recent_context = ""
@@ -172,14 +174,14 @@ Provide a helpful, conversational response addressing the student's clarificatio
 
 Return exactly in this format:
 
-NARRATION:
-<The spoken, conversational explanation>
-
 BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
 <Optional instructions for generating an educational image. Leave blank if not needed.>
+
+NARRATION:
+<The spoken, conversational explanation>
 
 {question_output}
 """
@@ -206,6 +208,7 @@ VISUAL_DIRECTIVE:
         teaching_context: list[str] | None = None,
         language: str = "English",
         planned_concepts: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
         state = TeacherState(
             student_id=student_id,
@@ -222,7 +225,7 @@ VISUAL_DIRECTIVE:
         state.concept_steps_current = 1
         state.concept_history = []
 
-        teaching = self.teaching.generate(state, plan, context=teaching_context)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
         state.concept_history.append(teaching)
 
         if state.concept_steps_current == state.concept_steps_total:
@@ -232,6 +235,8 @@ VISUAL_DIRECTIVE:
             question = "When you're ready, say \"Continue\" or ask a question."
             state.last_question = question
             state.assessment_active = False
+
+        state.sync_cursor()
 
         return {
             "state": state,
@@ -248,6 +253,7 @@ VISUAL_DIRECTIVE:
         state.increment_attempt()
         state.assessment_active = False
         state.recent_clarifications = []
+        state.resume_cursor_after_clarification()
         
         evaluation = self.evaluator.evaluate(state, answer)
         self.misconception.process(state, evaluation.misconception)
@@ -255,23 +261,26 @@ VISUAL_DIRECTIVE:
 
         if state.mastery_score >= 0.8:
             next_concept = self.graph.get_next_concept(state)
+            state.sync_cursor()
             return {
                 "evaluation": evaluation,
                 "action": "next_concept",
                 "next_concept": next_concept,
             }
 
+        state.sync_cursor()
         return {
             "evaluation": evaluation,
             "action": "reteach",
             "next_concept": None,
         }
 
-    def continue_step(self, state: TeacherState, teaching_context: list[str] | None = None):
+    def continue_step(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None):
+        state.resume_cursor_after_clarification()
         state.concept_steps_current += 1
         plan = self.planner.create_plan(state)
         
-        teaching = self.teaching.generate(state, plan, context=teaching_context)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
         state.concept_history.append(teaching)
         
         if state.concept_steps_current == state.concept_steps_total:
@@ -282,6 +291,7 @@ VISUAL_DIRECTIVE:
             state.last_question = question
             state.assessment_active = False
             
+        state.sync_cursor()
         return {
             "action": "continue_step",
             "concept": state.current_concept,
@@ -290,13 +300,14 @@ VISUAL_DIRECTIVE:
             "question": question,
         }
 
-    async def continue_step_stream(self, state: TeacherState, teaching_context: list[str] | None = None):
+    async def continue_step_stream(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None):
+        state.resume_cursor_after_clarification()
         state.concept_steps_current += 1
         plan = self.planner.create_plan(state)
         
         async def generator():
             teaching_text = ""
-            async for chunk in self.teaching.generate_stream(state, plan, context=teaching_context):
+            async for chunk in self.teaching.generate_stream(state, plan, context=teaching_context, candidate_visuals=candidate_visuals):
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
                 
@@ -310,6 +321,7 @@ VISUAL_DIRECTIVE:
                 state.last_question = question
                 state.assessment_active = False
                 
+            state.sync_cursor()
             yield {
                 "type": "complete",
                 "data": {
@@ -348,7 +360,7 @@ VISUAL_DIRECTIVE:
         # 4. Student has mastered the concept
         if state.mastery_score >= 0.8:
             next_concept = self.graph.get_next_concept(state)
-
+            state.sync_cursor()
             return {
                 "evaluation": evaluation,
                 "action": "next_concept",
@@ -356,6 +368,7 @@ VISUAL_DIRECTIVE:
             }
 
         # 5. Student still needs help
+        state.sync_cursor()
         return {
             "evaluation": evaluation,
             "action": "reteach",
@@ -365,7 +378,9 @@ VISUAL_DIRECTIVE:
         self,
         state: TeacherState,
         teaching_context: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
+        state.resume_cursor_after_clarification()
         if state.needs_reteaching:
             plan = self.planner.create_plan(state)
             
@@ -373,7 +388,7 @@ VISUAL_DIRECTIVE:
             state.concept_steps_current = 1
             state.concept_history = []
 
-            teaching = self.teaching.generate(state, plan, context=teaching_context)
+            teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
             state.concept_history.append(teaching)
 
             if state.concept_steps_current == state.concept_steps_total:
@@ -384,6 +399,7 @@ VISUAL_DIRECTIVE:
                 state.last_question = question
                 state.assessment_active = False
 
+            state.sync_cursor()
             return {
                 "action": "reteach",
                 "concept": state.current_concept,
@@ -396,6 +412,7 @@ VISUAL_DIRECTIVE:
 
         if next_concept is None:
             state.current_phase = "completed"
+            state.sync_cursor()
             return {
                 "action": "completed",
                 "concept": None,
@@ -416,7 +433,7 @@ VISUAL_DIRECTIVE:
 
         plan = self.planner.create_plan(state)
 
-        teaching = self.teaching.generate(state, plan, context=teaching_context)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
         state.concept_history.append(teaching)
 
         if state.concept_steps_current == state.concept_steps_total:
@@ -442,6 +459,7 @@ VISUAL_DIRECTIVE:
         teaching_context: list[str] | None = None,
         language: str = "English",
         planned_concepts: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
         state = TeacherState(
             student_id=student_id,
@@ -464,6 +482,7 @@ VISUAL_DIRECTIVE:
                 state,
                 plan,
                 context=teaching_context,
+                candidate_visuals=candidate_visuals,
             ):
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
@@ -484,6 +503,7 @@ VISUAL_DIRECTIVE:
                 state.last_question = question
                 state.assessment_active = False
             
+            state.sync_cursor()
             yield {
                 "type": "complete",
                 "data": {
@@ -500,7 +520,9 @@ VISUAL_DIRECTIVE:
         self,
         state: TeacherState,
         teaching_context: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
+        state.resume_cursor_after_clarification()
         if state.needs_reteaching:
             plan = self.planner.create_plan(state)
             
@@ -514,6 +536,7 @@ VISUAL_DIRECTIVE:
                     state,
                     plan,
                     context=teaching_context,
+                    candidate_visuals=candidate_visuals,
                 ):
                     teaching_text += chunk
                     yield {"type": "teaching_chunk", "content": chunk}
@@ -528,6 +551,7 @@ VISUAL_DIRECTIVE:
                     state.last_question = question
                     state.assessment_active = False
                 
+                state.sync_cursor()
                 yield {
                     "type": "complete",
                     "data": {
@@ -544,6 +568,7 @@ VISUAL_DIRECTIVE:
 
         if next_concept is None:
             state.current_phase = "completed"
+            state.sync_cursor()
 
             async def complete_generator():
                 yield {
@@ -576,6 +601,7 @@ VISUAL_DIRECTIVE:
                 state,
                 plan,
                 context=teaching_context,
+                candidate_visuals=candidate_visuals,
             ):
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
@@ -590,6 +616,7 @@ VISUAL_DIRECTIVE:
                 state.last_question = question
                 state.assessment_active = False
             
+            state.sync_cursor()
             yield {
                 "type": "complete",
                 "data": {

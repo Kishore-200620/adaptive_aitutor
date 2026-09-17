@@ -37,6 +37,16 @@ async function fetchApi<T>(endpoint: string, options: RequestInit = {}): Promise
 }
 
 export const eduvaApi = {
+  initStudent: () =>
+    fetchApi<{student_id: number, name: string}>('/students/init', {
+      method: 'POST',
+    }),
+
+  checkAudioStatus: (url: string) =>
+    fetchApi<{status: string}>(url, {
+      method: 'GET',
+    }),
+
   startLesson: (data: StartLessonRequest) => 
     fetchApi<LessonResponse>('/lessons/start', {
       method: 'POST',
@@ -71,9 +81,10 @@ export const eduvaApi = {
       body: JSON.stringify({ language }),
     }),
 
-  uploadDocument: async (file: File) => {
+  uploadDocument: async (file: File, studentId: number) => {
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('student_id', studentId.toString());
     
     // We can't use fetchApi because it sets Content-Type to application/json by default
     // For FormData, we must let the browser set the Content-Type with boundary automatically
@@ -94,13 +105,24 @@ export const eduvaApi = {
   },
 };
 
+export interface PresentationUnit {
+  event_id: string;
+  chunk_id: string;
+  sequence: number;
+  text: string;
+  audio_url: string;
+  status: 'pending' | 'ready' | 'playing' | 'completed' | 'failed' | 'cancelled';
+}
+
 export async function fetchApiStream(
   endpoint: string,
   options: RequestInit,
   onChunk: (chunk: string) => void,
-  onComplete: (data: any) => void,
+  onComplete: (data: LessonResponse) => void,
   onError: (error: Error, hasReceivedData: boolean) => void,
-  onPresentation?: (data: any) => void
+  onPresentation?: (data: any) => void,
+  onAudioChunk?: (url: string) => void,
+  onPresentationUnit?: (unit: PresentationUnit) => void
 ) {
   const url = `${API_BASE_URL}${endpoint}`;
   const headers = new Headers(options.headers || {});
@@ -145,6 +167,12 @@ export async function fetchApiStream(
             if (data.type === 'teaching_chunk') {
               hasReceivedData = true;
               onChunk(data.content);
+            } else if (data.type === 'audio_chunk' && onAudioChunk) {
+              hasReceivedData = true;
+              onAudioChunk(data.url);
+            } else if (data.type === 'presentation_unit' && onPresentationUnit) {
+              hasReceivedData = true;
+              onPresentationUnit(data as PresentationUnit);
             } else if (data.type === 'complete') {
               hasReceivedData = true;
               onComplete(data.data);
@@ -173,6 +201,8 @@ export const eduvaStreamApi = {
     onComplete: (data: LessonResponse) => void,
     onError: (error: Error, hasReceivedData: boolean) => void,
     onPresentation?: (data: any) => void,
+    onAudioChunk?: (url: string) => void,
+    onPresentationUnit?: (unit: PresentationUnit) => void,
     signal?: AbortSignal
   ) =>
     fetchApiStream(
@@ -181,7 +211,9 @@ export const eduvaStreamApi = {
       onChunk,
       onComplete,
       onError,
-      onPresentation
+      onPresentation,
+      onAudioChunk,
+      onPresentationUnit
     ),
 
   submitAnswerStream: (
@@ -190,6 +222,8 @@ export const eduvaStreamApi = {
     onComplete: (data: LessonResponse) => void,
     onError: (error: Error, hasReceivedData: boolean) => void,
     onPresentation?: (data: any) => void,
+    onAudioChunk?: (url: string) => void,
+    onPresentationUnit?: (unit: PresentationUnit) => void,
     signal?: AbortSignal
   ) =>
     fetchApiStream(
@@ -198,6 +232,8 @@ export const eduvaStreamApi = {
       onChunk,
       onComplete,
       onError,
-      onPresentation
+      onPresentation,
+      onAudioChunk,
+      onPresentationUnit
     ),
 };

@@ -43,3 +43,10 @@ class Document(Base):
         back_populates="document",
         cascade="all, delete-orphan",
     )
+
+    visuals = relationship(
+        "DocumentVisual",
+        back_populates="document",
+        cascade="all, delete-orphan",
+        order_by="DocumentVisual.page_number, DocumentVisual.image_index",
+    )

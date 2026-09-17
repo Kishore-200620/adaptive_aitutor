@@ -5,9 +5,11 @@ interface LiveAiTeacherProps {
   audioUrl: string | null;
   onAudioOwnerChange: (owner: 'simli' | 'fallback') => void;
   audioEnabled: boolean;
+  onAudioPlay?: () => void;
+  onAudioEnded?: () => void;
 }
 
-export function LiveAiTeacher({ audioUrl, onAudioOwnerChange, audioEnabled }: LiveAiTeacherProps) {
+export function LiveAiTeacher({ audioUrl, onAudioOwnerChange, audioEnabled, onAudioPlay, onAudioEnded }: LiveAiTeacherProps) {
   const [simliClient, setSimliClient] = useState<SimliClient | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const [status, setStatus] = useState('Connecting to AI Teacher...');
@@ -21,9 +23,15 @@ export function LiveAiTeacher({ audioUrl, onAudioOwnerChange, audioEnabled }: Li
   // This prevents Simli re-initialization every time the parent renders.
   // The ref is always kept current so event handlers call the latest version.
   const onAudioOwnerChangeRef = useRef(onAudioOwnerChange);
+  const onAudioPlayRef = useRef(onAudioPlay);
+  const onAudioEndedRef = useRef(onAudioEnded);
   useEffect(() => {
     onAudioOwnerChangeRef.current = onAudioOwnerChange;
+    onAudioPlayRef.current = onAudioPlay;
+    onAudioEndedRef.current = onAudioEnded;
   });
+
+  const initStarted = useRef(false);
 
   // Initialize Simli Client exactly ONCE on mount.
   // Empty dep array [] is intentional:
@@ -31,6 +39,9 @@ export function LiveAiTeacher({ audioUrl, onAudioOwnerChange, audioEnabled }: Li
   // - We do NOT want to re-initialize Simli on every parent render.
   // - Genuine remounts will trigger a new init — correct behavior.
   useEffect(() => {
+    if (initStarted.current) return;
+    initStarted.current = true;
+
     let activeClient: SimliClient | null = null;
     let cancelled = false;
 
@@ -199,7 +210,14 @@ export function LiveAiTeacher({ audioUrl, onAudioOwnerChange, audioEnabled }: Li
         if (offset >= uint8Data.length) {
           if (loopRef.current) clearInterval(loopRef.current);
           loopRef.current = null;
+          if (onAudioEndedRef.current) {
+            onAudioEndedRef.current();
+          }
           return;
+        }
+        
+        if (offset === 0 && onAudioPlayRef.current) {
+          onAudioPlayRef.current();
         }
         
         const chunk = uint8Data.slice(offset, offset + chunkSize);

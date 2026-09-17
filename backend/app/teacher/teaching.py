@@ -10,12 +10,19 @@ class TeachingEngine:
         state: TeacherState,
         plan: LessonPlan,
         context: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
         context_text = (
             "\n\n".join(context)
             if context
             else "No reference material provided."
         )
+
+        visuals_context = ""
+        if candidate_visuals:
+            visuals_context = "AVAILABLE PDF VISUALS (You may select ONE if it highly matches the concept):\n"
+            for v in candidate_visuals:
+                visuals_context += f"- [ID: {v['id']}] Type: {v.get('visual_type', 'unknown')}, Caption: {v.get('caption', 'None')}\n"
 
         total_subtopics = len(state.planned_concepts) if state.planned_concepts else 1
         subtopic_idx = state.current_concept_index + 1
@@ -51,6 +58,8 @@ Teaching goal:
 REFERENCE MATERIAL:
 {context_text}
 
+{visuals_context}
+
 Teach this concept to the student.
 
 Rules:
@@ -68,14 +77,14 @@ Rules:
 
 Return exactly in this format:
 
-NARRATION:
-<The spoken, conversational explanation pointing to the blackboard>
-
 BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
-<Optional instructions for generating an educational image to accompany this concept. Leave blank if not needed.>
+<Optional instructions for generating an educational image. Leave blank if not needed. If an available PDF visual is highly relevant to the concept, you MUST use it by writing exactly: USE_PDF_VISUAL: [ID]>
+
+NARRATION:
+<The spoken, conversational explanation pointing to the blackboard>
 
 QUESTION:
 {question_instruction}
@@ -90,12 +99,19 @@ QUESTION:
         state: TeacherState,
         plan: LessonPlan,
         context: list[str] | None = None,
+        candidate_visuals: list[dict] | None = None,
     ):
         context_text = (
             "\n\n".join(context)
             if context
             else "No reference material provided."
         )
+
+        visuals_context = ""
+        if candidate_visuals:
+            visuals_context = "AVAILABLE PDF VISUALS (You may select ONE if it highly matches the concept):\n"
+            for v in candidate_visuals:
+                visuals_context += f"- [ID: {v['id']}] Type: {v.get('visual_type', 'unknown')}, Caption: {v.get('caption', 'None')}\n"
 
         total_subtopics = len(state.planned_concepts) if state.planned_concepts else 1
         subtopic_idx = state.current_concept_index + 1
@@ -131,6 +147,8 @@ Teaching goal:
 REFERENCE MATERIAL:
 {context_text}
 
+{visuals_context}
+
 Teach this concept to the student.
 
 Rules:
@@ -148,14 +166,14 @@ Rules:
 
 Return exactly in this format:
 
-NARRATION:
-<The spoken, conversational explanation pointing to the blackboard>
-
 BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
-<Optional instructions for generating an educational image to accompany this concept. Leave blank if not needed.>
+<Optional instructions for generating an educational image. Leave blank if not needed. If an available PDF visual is highly relevant to the concept, you MUST use it by writing exactly: USE_PDF_VISUAL: [ID]>
+
+NARRATION:
+<The spoken, conversational explanation pointing to the blackboard>
 
 QUESTION:
 {question_instruction}

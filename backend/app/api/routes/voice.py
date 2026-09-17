@@ -4,14 +4,14 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.voice.tts import TTSService
+from app.voice.tts import tts_service
 
 
 from uuid import uuid4
 
 router = APIRouter(prefix="/voice", tags=["Voice"])
 
-tts_service = TTSService()
+
 
 
 class SpeechRequest(BaseModel):
@@ -41,6 +41,20 @@ async def synthesize_speech(request: SpeechRequest):
         "audio_file": filename,
         "audio_url": f"/voice/audio/{filename}",
     }
+
+
+@router.get("/audio/status/{filename}")
+def get_audio_status(filename: str):
+    status = tts_service.job_status.get(filename)
+    if status:
+        return {"status": status}
+    
+    audio_dir = Path(tts_service.output_dir)
+    audio_path = audio_dir / filename
+    if audio_path.exists():
+        return {"status": "ready"}
+    
+    return {"status": "failed"}
 
 
 @router.get("/audio/{filename}")

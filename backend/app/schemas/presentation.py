@@ -12,12 +12,22 @@ class VoiceDecision(BaseModel):
     enabled: bool
     narration: str
 
+class PdfVisualMetadata(BaseModel):
+    visual_id: int
+    document_id: int
+    page_number: int
+    visual_type: str
+    asset_url: Optional[str] = None
+    caption: Optional[str] = None
+    metadata: dict = {}
+
 class BlackboardDecision(BaseModel):
     enabled: bool
     content: str
     visual_type: str = "text"
-    visual_source: str = "text" # "text", "generated_image", "pdf_image"
+    visual_source: str = "text" # "text", "generated_image", "pdf_visual"
     visual_url: Optional[str] = None
+    pdf_visual: Optional[PdfVisualMetadata] = None
 
 class TeacherVideoTrigger(str, Enum):
     INTRO = "intro"

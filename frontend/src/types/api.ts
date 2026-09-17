@@ -26,11 +26,22 @@ export interface TeacherState {
   concept_steps_total?: number;
   concept_steps_current?: number;
   concept_history?: any[];
+  teaching_cursor?: Record<string, any> | null;
 }
 
 export interface VoiceDecision {
   enabled: boolean;
   narration: string;
+}
+
+export interface PdfVisualMetadata {
+  visual_id: number;
+  document_id: number;
+  page_number: number;
+  visual_type: string;
+  asset_url: string | null;
+  caption: string | null;
+  metadata: Record<string, any>;
 }
 
 export interface BlackboardDecision {
@@ -39,6 +50,7 @@ export interface BlackboardDecision {
   visual_type: string;
   visual_source: string;
   visual_url: string | null;
+  pdf_visual?: PdfVisualMetadata | null;
 }
 
 export type TeacherVideoTrigger = 'intro' | 'concept_intro' | 'emphasis' | 'transition' | 'encouragement' | 'completion' | 'none';

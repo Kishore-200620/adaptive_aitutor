@@ -3,9 +3,10 @@ import { useEffect, useRef, useState } from 'react';
 interface PredefinedTeacherVideoProps {
   url: string;
   onEnded: () => void;
+  muted?: boolean;
 }
 
-export function PredefinedTeacherVideo({ url, onEnded }: PredefinedTeacherVideoProps) {
+export function PredefinedTeacherVideo({ url, onEnded, muted = false }: PredefinedTeacherVideoProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [opacity, setOpacity] = useState(0);
 
@@ -53,7 +54,7 @@ export function PredefinedTeacherVideo({ url, onEnded }: PredefinedTeacherVideoP
           onEnded={handleEnded}
           autoPlay 
           playsInline
-          muted // Muted to preserve Edge TTS as the single audio owner
+          muted={muted}
           style={{ width: '100%', height: '100%', objectFit: 'cover' }}
         />
       </div>

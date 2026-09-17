@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
 import { MainLayout } from './layouts/MainLayout'
 import { MaterialList } from './features/materials/MaterialList'
 import { LessonHistory } from './features/lessons/LessonHistory'
@@ -8,6 +8,7 @@ import { AiTeacherWorkspace } from './features/teacher/AiTeacherWorkspace'
 import { QuestionAnswerArea } from './features/interaction/QuestionAnswerArea'
 import type { LessonResponse, TeacherState } from './types/api'
 import { eduvaApi, eduvaStreamApi } from './lib/api'
+import type { PresentationUnit } from './lib/api'
 import { storage } from './lib/storage'
 
 export default function App() {
@@ -30,14 +31,29 @@ export default function App() {
   const [topic, setTopic] = useState('');
   const [selectedDocument, setSelectedDocument] = useState<{id: number, filename: string} | null>(null);
 
-  // Fallback to 2 if not set in environment
-  const studentId = parseInt(import.meta.env.VITE_DEV_STUDENT_ID || '2', 10);
+  // Dynamic student identification
+  const [studentId, setStudentId] = useState<number | null>(null);
+  const [, setAudioQueue] = useState<string[]>([]);
+  const [presentationUnits, setPresentationUnits] = useState<PresentationUnit[]>([]);
+  
+  useEffect(() => {
+    let mounted = true;
+    eduvaApi.initStudent()
+      .then(res => {
+        if (mounted) setStudentId(res.student_id);
+      })
+      .catch(err => {
+        console.error("Failed to initialize student", err);
+        if (mounted) setError("Failed to initialize student profile. Please ensure the backend is running.");
+      });
+    return () => { mounted = false; };
+  }, []);
   
   const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleStartLesson = async () => {
     const finalTopic = topic.trim();
-    if (!finalTopic) return;
+    if (!finalTopic || studentId === null) return;
     
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
@@ -47,6 +63,8 @@ export default function App() {
     setIsLoading(true);
     setError(null);
     setCurrentView('learning_studio');
+    setAudioQueue([]);
+    setPresentationUnits([]);
     
     // Set provisional session data
     setSessionData({
@@ -149,6 +167,12 @@ export default function App() {
             };
           });
         },
+        (url: string) => {
+          setAudioQueue((prev) => [...prev, url]);
+        },
+        (unit: PresentationUnit) => {
+          setPresentationUnits((prev) => [...prev, unit]);
+        },
         abortControllerRef.current.signal
       );
     } catch (err: unknown) {
@@ -163,6 +187,8 @@ export default function App() {
   const handleContinueSession = async (sessionId: number) => {
     setIsLoading(true);
     setError(null);
+    setAudioQueue([]);
+    setPresentationUnits([]);
     try {
       const response = await eduvaApi.recoverSession(sessionId);
       setSessionData(response);
@@ -191,6 +217,8 @@ export default function App() {
     
     setIsSubmitting(true);
     setError(null);
+    setAudioQueue([]);
+    setPresentationUnits([]);
     
     // Clear previous teaching display but keep state authoritative
     setSessionData((prev) => {
@@ -283,6 +311,12 @@ export default function App() {
             };
           });
         },
+        (url: string) => {
+          setAudioQueue((prev) => [...prev, url]);
+        },
+        (unit: PresentationUnit) => {
+          setPresentationUnits((prev) => [...prev, unit]);
+        },
         abortControllerRef.current.signal
       );
       
@@ -331,13 +365,22 @@ export default function App() {
   const sidebarContent = (
     <>
       <MaterialList 
-        onSelectMaterial={(docId, filename) => setSelectedDocument({ id: docId, filename })} 
+        onSelectMaterial={(id, name) => setSelectedDocument({ id, filename: name })}
+        studentId={studentId!}
         disabled={isLoading} 
       />
       <LessonHistory onContinueSession={handleContinueSession} disabled={isLoading} />
       <ConceptTracker state={activeState} />
     </>
   );
+
+  if (studentId === null && !error) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100vh', backgroundColor: 'var(--bg-main)' }}>
+        <div style={{ color: 'var(--text-secondary)' }}>Initializing Student Profile...</div>
+      </div>
+    );
+  }
 
   if (currentView === 'home') {
     return (
@@ -618,54 +661,57 @@ export default function App() {
     <MainLayout
       sidebarContent={sidebarContent}
       headerContent={
-        <div style={{ display: 'flex', alignItems: 'center', width: '100%' }}>
-          <button 
-            onClick={() => {
-              setCurrentView('home');
-              setSessionData(null);
-            }}
-            style={{
-              padding: '0.5rem 1rem',
-              backgroundColor: 'transparent',
-              border: 'none',
-              color: 'var(--text-secondary)',
-              fontWeight: 500,
-              cursor: 'pointer',
-              display: 'flex',
-              alignItems: 'center',
-              gap: '0.5rem',
-              marginRight: 'auto'
-            }}
-          >
-            ← Back to Learning
-          </button>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '1rem', marginRight: '1rem' }}>
-            <button
-              onClick={() => setAudioEnabled(!audioEnabled)}
-              style={{
-                padding: '0.5rem 0.75rem',
-                backgroundColor: audioEnabled ? '#e0f2fe' : '#f1f5f9',
-                border: '1px solid',
-                borderColor: audioEnabled ? '#bae6fd' : '#cbd5e1',
-                borderRadius: 'var(--radius-md)',
-                color: audioEnabled ? '#0284c7' : '#64748b',
-                fontWeight: 500,
-                cursor: 'pointer',
-                display: 'flex',
-                alignItems: 'center',
-                gap: '0.5rem',
-                fontSize: '0.875rem'
-              }}
-            >
-              {audioEnabled ? '🔊 Audio On' : '🔇 Audio Off'}
-            </button>
+        <StudentStateHeader 
+          state={activeState}
+          leftContent={
+            <>
+              <button 
+                onClick={() => {
+                  setCurrentView('home');
+                  setSessionData(null);
+                }}
+                style={{
+                  padding: '0.5rem 0.5rem',
+                  backgroundColor: 'transparent',
+                  border: 'none',
+                  color: 'var(--text-secondary)',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.25rem'
+                }}
+              >
+                ← Back
+              </button>
+              <button
+                onClick={() => setAudioEnabled(!audioEnabled)}
+                style={{
+                  padding: '0.5rem 0.5rem',
+                  backgroundColor: audioEnabled ? '#e0f2fe' : '#f1f5f9',
+                  border: '1px solid',
+                  borderColor: audioEnabled ? '#bae6fd' : '#cbd5e1',
+                  borderRadius: 'var(--radius-md)',
+                  color: audioEnabled ? '#0284c7' : '#64748b',
+                  fontWeight: 500,
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '0.25rem',
+                  fontSize: '0.875rem'
+                }}
+              >
+                {audioEnabled ? '🔊' : '🔇'}
+              </button>
+            </>
+          }
+          rightContent={
             <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              <span style={{ fontSize: '0.875rem', color: 'var(--text-secondary)', fontWeight: 500 }}>Language:</span>
               <select
                 value={language}
                 onChange={(e) => handleLanguageChange(e.target.value as 'English' | 'Tamil' | 'Hindi')}
                 style={{
-                  padding: '0.4rem 0.75rem',
+                  padding: '0.2rem 0.5rem',
                   borderRadius: 'var(--radius-md)',
                   border: '1px solid var(--border-color)',
                   backgroundColor: 'white',
@@ -676,14 +722,13 @@ export default function App() {
                   outline: 'none'
                 }}
               >
-                <option value="English">English</option>
-                <option value="Tamil">தமிழ்</option>
-                <option value="Hindi">हिन्दी</option>
+                <option value="English">EN</option>
+                <option value="Tamil">TA</option>
+                <option value="Hindi">HI</option>
               </select>
             </div>
-          </div>
-          <StudentStateHeader state={activeState} />
-        </div>
+          }
+        />
       }
       interactionContent={
         <>
@@ -734,7 +779,9 @@ export default function App() {
             teachingText={sessionData.teaching || ''}
             presentation={sessionData.presentation || null}
             audioUrl={sessionData.audio_url || null}
+            presentationUnits={presentationUnits}
             audioEnabled={audioEnabled}
+            isStreaming={isLoading || isSubmitting}
           />
         )}
         
