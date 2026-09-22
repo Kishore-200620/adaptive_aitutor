@@ -28,6 +28,8 @@ class Settings(BaseSettings):
     avatar_output_dir: str = "storage/video"
 
     simli_api_key: str = ""
+    pollinations_api_key: str = ""
+    pollinations_image_model: str = "flux.2-max"
 
     model_config = SettingsConfigDict(
         env_file=str(ENV_FILE),

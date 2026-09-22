@@ -7,3 +7,5 @@ from app.models.attempt import Attempt
 from app.models.assessment import Assessment
 from app.models.document_chunk import DocumentChunk
 from app.models.document_visual import DocumentVisual
+from app.models.event import SessionEvent
+from app.models.memory import LearnerMemory

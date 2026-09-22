@@ -330,6 +330,13 @@ export function AiTeacherWorkspace({ teachingText, presentation, audioUrl, prese
                    <img 
                      src={blackboardUrl} 
                      alt="Reference Visual"
+                     onError={(e) => {
+                       const target = e.target as HTMLImageElement;
+                       if (!target.src.includes('emergency_fallback.svg')) {
+                         target.onerror = null;
+                         target.src = '/static/images/emergency_fallback.svg';
+                       }
+                     }}
                      style={{ maxWidth: '100%', maxHeight: '400px', objectFit: 'contain', borderRadius: '4px' }}
                    />
                  </div>

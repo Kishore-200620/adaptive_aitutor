@@ -91,7 +91,7 @@ Example format:
 }}
 """
         try:
-            response = groq_service.generate(prompt)
+            response = groq_service.generate(prompt, expected_format="json")
             # Clean up potential markdown formatting if the LLM ignores the instruction
             cleaned = response.strip()
             if cleaned.startswith("```json"):

@@ -3,7 +3,7 @@ from app.teacher.state import TeacherState
 
 class AdaptationEngine:
 
-    def adapt(self, state: TeacherState) -> None:
+    def adapt(self, state: TeacherState, roadmap_status: str) -> None:
 
         # Select teaching strategy based on mastery
         if state.mastery_score < 0.4:
@@ -16,7 +16,7 @@ class AdaptationEngine:
             state.teaching_strategy = "direct_explanation"
 
         # Student has mastered the current concept
-        if state.mastery_score >= 0.8:
+        if roadmap_status == "complete":
 
             state.mark_understood()
 
@@ -32,10 +32,12 @@ class AdaptationEngine:
                 state.concepts_struggling.remove(
                     state.current_concept
                 )
+                
+            state.needs_reteaching = False
 
             return
 
-        # Any score below mastery threshold requires
+        # Any score below mastery threshold or having unresolved misconceptions requires
         # additional teaching/practice.
         state.needs_reteaching = True
         state.current_phase = "reteaching"

@@ -161,9 +161,19 @@ export default function App() {
         (presentationData) => {
           setSessionData((prev) => {
             if (!prev) return prev;
+            const newPres = { ...presentationData };
+            if (
+              prev.presentation?.blackboard?.visual_url && 
+              !newPres.blackboard?.visual_url
+            ) {
+              newPres.blackboard.visual_url = prev.presentation.blackboard.visual_url;
+              newPres.blackboard.visual_source = prev.presentation.blackboard.visual_source;
+              newPres.blackboard.visual_type = prev.presentation.blackboard.visual_type;
+              newPres.blackboard.enabled = true;
+            }
             return {
               ...prev,
-              presentation: presentationData
+              presentation: newPres
             };
           });
         },
@@ -227,8 +237,7 @@ export default function App() {
         ...prev,
         teaching: '',
         question: '',
-        presentation: null,
-        audio_url: null,
+        // Keep presentation and audio_url to avoid visual flicker during loading
         // Keep evaluation from previous round visible until new one arrives
       };
     });
@@ -305,9 +314,19 @@ export default function App() {
         (presentationData) => {
           setSessionData((prev) => {
             if (!prev) return prev;
+            const newPres = { ...presentationData };
+            if (
+              prev.presentation?.blackboard?.visual_url && 
+              !newPres.blackboard?.visual_url
+            ) {
+              newPres.blackboard.visual_url = prev.presentation.blackboard.visual_url;
+              newPres.blackboard.visual_source = prev.presentation.blackboard.visual_source;
+              newPres.blackboard.visual_type = prev.presentation.blackboard.visual_type;
+              newPres.blackboard.enabled = true;
+            }
             return {
               ...prev,
-              presentation: presentationData
+              presentation: newPres
             };
           });
         },

@@ -11,6 +11,7 @@ class TeachingEngine:
         plan: LessonPlan,
         context: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
     ):
         context_text = (
             "\n\n".join(context)
@@ -60,6 +61,8 @@ REFERENCE MATERIAL:
 
 {visuals_context}
 
+{learner_memory_context or ""}
+
 Teach this concept to the student.
 
 Rules:
@@ -81,7 +84,7 @@ BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
-<Optional instructions for generating an educational image. Leave blank if not needed. If an available PDF visual is highly relevant to the concept, you MUST use it by writing exactly: USE_PDF_VISUAL: [ID]>
+<If the student explicitly asks to see a picture, image, diagram, or asks to "show", "draw", or "visualize" something, you MUST provide a concise instruction for generating it. You may also provide an instruction if you believe an illustration strongly benefits the explanation. Otherwise, leave blank if no visual is needed. If an available PDF visual is highly relevant to the concept, you MUST prioritize it by writing exactly: USE_PDF_VISUAL: [ID]>
 
 NARRATION:
 <The spoken, conversational explanation pointing to the blackboard>
@@ -100,6 +103,7 @@ QUESTION:
         plan: LessonPlan,
         context: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
     ):
         context_text = (
             "\n\n".join(context)
@@ -149,6 +153,8 @@ REFERENCE MATERIAL:
 
 {visuals_context}
 
+{learner_memory_context or ""}
+
 Teach this concept to the student.
 
 Rules:
@@ -170,7 +176,7 @@ BLACKBOARD:
 <Concise visual content, labels, diagrams, or equations. Keep it very short.>
 
 VISUAL_DIRECTIVE:
-<Optional instructions for generating an educational image. Leave blank if not needed. If an available PDF visual is highly relevant to the concept, you MUST use it by writing exactly: USE_PDF_VISUAL: [ID]>
+<If the student explicitly asks to see a picture, image, diagram, or asks to "show", "draw", or "visualize" something, you MUST provide a concise instruction for generating it. You may also provide an instruction if you believe an illustration strongly benefits the explanation. Otherwise, leave blank if no visual is needed. If an available PDF visual is highly relevant to the concept, you MUST prioritize it by writing exactly: USE_PDF_VISUAL: [ID]>
 
 NARRATION:
 <The spoken, conversational explanation pointing to the blackboard>

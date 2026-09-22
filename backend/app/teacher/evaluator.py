@@ -1,12 +1,12 @@
 from app.teacher.state import TeacherState
-from app.ai.groq import groq_service
+from app.ai.groq import groq_service, LLMReliabilityError
 
 
 class EvaluationResult:
     def __init__(
         self,
         correctness: str,
-        score: float,
+        score: float | None,
         feedback: str,
         misconception: str | None = None,
     ):
@@ -26,7 +26,7 @@ class EvaluationResult:
 
 class AnswerEvaluator:
 
-    def evaluate(
+    async def evaluate(
         self,
         state: TeacherState,
         answer: str,
@@ -68,7 +68,15 @@ Rules:
 - Keep SCORE as a numeric value from 0 to 1.
 """
 
-        response = groq_service.generate(prompt)
+        try:
+            response = await groq_service.async_generate(prompt, expected_format="evaluator")
+        except LLMReliabilityError:
+            return EvaluationResult(
+                correctness="retry_required",
+                score=None,
+                feedback="I'm having trouble thinking right now. Let's try answering that again in a moment.",
+                misconception=None,
+            )
 
         return self._parse_response(
             response,

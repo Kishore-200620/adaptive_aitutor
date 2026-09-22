@@ -25,7 +25,7 @@ class BlackboardDecision(BaseModel):
     enabled: bool
     content: str
     visual_type: str = "text"
-    visual_source: str = "text" # "text", "generated_image", "pdf_visual"
+    visual_source: str = "text" # "text", "generated_image", "pdf_visual", "local_diagram"
     visual_url: Optional[str] = None
     pdf_visual: Optional[PdfVisualMetadata] = None
 

@@ -21,7 +21,7 @@ class TeacherEngine:
         self.graph = ConceptGraph()
         self.visuals = VisualRouter()
 
-    def classify_intent(self, state: TeacherState, message: str) -> str:
+    async def classify_intent(self, state: TeacherState, message: str) -> str:
         # 1. Deterministic CONTINUE intent detector
         clean_msg = message.strip().lower()
         continue_phrases = [
@@ -64,14 +64,22 @@ or
 CLARIFICATION
 """
         try:
-            response = groq_service.generate(prompt).strip().upper()
+            response = await groq_service.async_generate(prompt)
+            response = response.strip().upper()
             if "CLARIFICATION" in response:
                 return "clarification"
             elif "ASSESSMENT_ANSWER" in response:
                 return "assessment_answer"
-            return "clarification"  # Safe fallback
-        except Exception:
-            return "clarification"  # Safe fallback
+                
+            if state.assessment_active:
+                return "assessment_answer"
+            return "continue"
+        except Exception as e:
+            from app.ai.groq import logger
+            logger.warning(f"[EDUVA][Groq] classify_intent failed, using context-aware fallback. Error: {e}")
+            if state.assessment_active:
+                return "assessment_answer"
+            return "continue"
 
     def clarify(self, state: TeacherState, message: str, context: list[str] | None = None) -> str:
         state.pause_cursor_for_clarification()
@@ -187,7 +195,11 @@ NARRATION:
 """
         async def generator():
             teaching_text = ""
-            async for chunk in groq_service.generate_stream(prompt):
+            async for chunk_evt in groq_service.generate_stream(prompt):
+                if chunk_evt["type"] == "interruption":
+                    yield chunk_evt
+                    return
+                chunk = chunk_evt["content"]
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
             
@@ -209,6 +221,7 @@ NARRATION:
         language: str = "English",
         planned_concepts: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
     ):
         state = TeacherState(
             student_id=student_id,
@@ -225,7 +238,7 @@ NARRATION:
         state.concept_steps_current = 1
         state.concept_history = []
 
-        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals, learner_memory_context=learner_memory_context)
         state.concept_history.append(teaching)
 
         if state.concept_steps_current == state.concept_steps_total:
@@ -245,42 +258,13 @@ NARRATION:
             "question": question,
         }
 
-    def answer(
-        self,
-        state: TeacherState,
-        answer: str,
-    ):
-        state.increment_attempt()
-        state.assessment_active = False
-        state.recent_clarifications = []
-        state.resume_cursor_after_clarification()
-        
-        evaluation = self.evaluator.evaluate(state, answer)
-        self.misconception.process(state, evaluation.misconception)
-        self.adaptation.adapt(state)
 
-        if state.mastery_score >= 0.8:
-            next_concept = self.graph.get_next_concept(state)
-            state.sync_cursor()
-            return {
-                "evaluation": evaluation,
-                "action": "next_concept",
-                "next_concept": next_concept,
-            }
-
-        state.sync_cursor()
-        return {
-            "evaluation": evaluation,
-            "action": "reteach",
-            "next_concept": None,
-        }
-
-    def continue_step(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None):
+    def continue_step(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None, learner_memory_context: str | None = None):
         state.resume_cursor_after_clarification()
         state.concept_steps_current += 1
         plan = self.planner.create_plan(state)
         
-        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals, learner_memory_context=learner_memory_context)
         state.concept_history.append(teaching)
         
         if state.concept_steps_current == state.concept_steps_total:
@@ -300,14 +284,18 @@ NARRATION:
             "question": question,
         }
 
-    async def continue_step_stream(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None):
+    async def continue_step_stream(self, state: TeacherState, teaching_context: list[str] | None = None, candidate_visuals: list[dict] | None = None, learner_memory_context: str | None = None):
         state.resume_cursor_after_clarification()
         state.concept_steps_current += 1
         plan = self.planner.create_plan(state)
         
         async def generator():
             teaching_text = ""
-            async for chunk in self.teaching.generate_stream(state, plan, context=teaching_context, candidate_visuals=candidate_visuals):
+            async for chunk_evt in self.teaching.generate_stream(state, plan, context=teaching_context, candidate_visuals=candidate_visuals, learner_memory_context=learner_memory_context):
+                if chunk_evt["type"] == "interruption":
+                    yield chunk_evt
+                    return
+                chunk = chunk_evt["content"]
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
                 
@@ -333,7 +321,7 @@ NARRATION:
                 }
             }
         return generator()
-    def answer(
+    async def answer(
         self,
         state: TeacherState,
         answer: str,
@@ -343,7 +331,7 @@ NARRATION:
         state.recent_clarifications = []
         
         # 1. Evaluate the student's answer
-        evaluation = self.evaluator.evaluate(
+        evaluation = await self.evaluator.evaluate(
             state,
             answer,
         )
@@ -354,31 +342,20 @@ NARRATION:
             evaluation.misconception,
         )
 
-        # 3. Adapt teaching strategy
-        self.adaptation.adapt(state)
+        # NOTE: self.adaptation.adapt(state, roadmap_status) is now called externally
+        # by the route handler after it resolves the RoadmapService progression decision.
 
-        # 4. Student has mastered the concept
-        if state.mastery_score >= 0.8:
-            next_concept = self.graph.get_next_concept(state)
-            state.sync_cursor()
-            return {
-                "evaluation": evaluation,
-                "action": "next_concept",
-                "next_concept": next_concept,
-            }
-
-        # 5. Student still needs help
         state.sync_cursor()
         return {
             "evaluation": evaluation,
-            "action": "reteach",
-            "next_concept": None,
         }
     def next_step(
         self,
         state: TeacherState,
         teaching_context: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
+        next_concept_title: str | None = None,
     ):
         state.resume_cursor_after_clarification()
         if state.needs_reteaching:
@@ -388,7 +365,7 @@ NARRATION:
             state.concept_steps_current = 1
             state.concept_history = []
 
-            teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
+            teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals, learner_memory_context=learner_memory_context)
             state.concept_history.append(teaching)
 
             if state.concept_steps_current == state.concept_steps_total:
@@ -408,7 +385,7 @@ NARRATION:
                 "question": question,
             }
 
-        next_concept = self.graph.get_next_concept(state)
+        next_concept = next_concept_title
 
         if next_concept is None:
             state.current_phase = "completed"
@@ -433,7 +410,7 @@ NARRATION:
 
         plan = self.planner.create_plan(state)
 
-        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals)
+        teaching = self.teaching.generate(state, plan, context=teaching_context, candidate_visuals=candidate_visuals, learner_memory_context=learner_memory_context)
         state.concept_history.append(teaching)
 
         if state.concept_steps_current == state.concept_steps_total:
@@ -460,6 +437,7 @@ NARRATION:
         language: str = "English",
         planned_concepts: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
     ):
         state = TeacherState(
             student_id=student_id,
@@ -478,12 +456,17 @@ NARRATION:
 
         async def generator():
             teaching_text = ""
-            async for chunk in self.teaching.generate_stream(
+            async for chunk_evt in self.teaching.generate_stream(
                 state,
                 plan,
                 context=teaching_context,
                 candidate_visuals=candidate_visuals,
+                learner_memory_context=learner_memory_context,
             ):
+                if chunk_evt["type"] == "interruption":
+                    yield chunk_evt
+                    return
+                chunk = chunk_evt["content"]
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
 
@@ -521,6 +504,8 @@ NARRATION:
         state: TeacherState,
         teaching_context: list[str] | None = None,
         candidate_visuals: list[dict] | None = None,
+        learner_memory_context: str | None = None,
+        next_concept_title: str | None = None,
     ):
         state.resume_cursor_after_clarification()
         if state.needs_reteaching:
@@ -532,12 +517,17 @@ NARRATION:
 
             async def reteach_generator():
                 teaching_text = ""
-                async for chunk in self.teaching.generate_stream(
+                async for chunk_evt in self.teaching.generate_stream(
                     state,
                     plan,
                     context=teaching_context,
                     candidate_visuals=candidate_visuals,
+                    learner_memory_context=learner_memory_context,
                 ):
+                    if chunk_evt["type"] == "interruption":
+                        yield chunk_evt
+                        return
+                    chunk = chunk_evt["content"]
                     teaching_text += chunk
                     yield {"type": "teaching_chunk", "content": chunk}
 
@@ -564,7 +554,7 @@ NARRATION:
                 }
             return reteach_generator()
 
-        next_concept = self.graph.get_next_concept(state)
+        next_concept = next_concept_title
 
         if next_concept is None:
             state.current_phase = "completed"
@@ -597,12 +587,17 @@ NARRATION:
 
         async def next_generator():
             teaching_text = ""
-            async for chunk in self.teaching.generate_stream(
+            async for chunk_evt in self.teaching.generate_stream(
                 state,
                 plan,
                 context=teaching_context,
                 candidate_visuals=candidate_visuals,
+                learner_memory_context=learner_memory_context,
             ):
+                if chunk_evt["type"] == "interruption":
+                    yield chunk_evt
+                    return
+                chunk = chunk_evt["content"]
                 teaching_text += chunk
                 yield {"type": "teaching_chunk", "content": chunk}
 

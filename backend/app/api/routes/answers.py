@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from sqlalchemy.orm import Session
 from uuid import uuid4
 import asyncio
+from typing import Optional
 
 from app.database.connection import get_db
 from app.models.session import TeachingSession
@@ -16,6 +17,9 @@ from app.voice.chunker import NarrationStreamer, TextChunker
 from app.models.lesson import Lesson
 from app.models.student import Student
 from app.rag.retriever import retrieve_relevant_chunks
+from app.services.event_service import EventService
+from app.services.memory_service import MemoryService
+from app.services.roadmap_service import RoadmapService
 
 router = APIRouter(
     prefix="/lessons",
@@ -34,44 +38,52 @@ learning_service = LearningService()
 
 orchestrator = PresentationOrchestrator()
 
-def parse_teaching_response(teaching: str) -> tuple[str, str, str]:
+def parse_teaching_response(teaching: str) -> tuple[str, str, str, int | None]:
     if not teaching:
-        return "", "", ""
+        return "", "", "", None
         
+    import re
+    
     narration = ""
     blackboard = ""
     directive = ""
+    pdf_visual_id = None
     
-    text = teaching
-    
-    if "QUESTION:" in text:
-        text = text.split("QUESTION:", 1)[0]
+    # Safely extract sections using regex.
+    # We look for the section header (allowing optional markdown ** or *), capture everything until the next known section header or EOF.
+    bb_match = re.search(r'\*?\*?BLACKBOARD:\*?\*?\s*(.*?)(?=^[\s\*]*(?:BLACKBOARD|VISUAL_DIRECTIVE|NARRATION|QUESTION):|$)', teaching, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+    if bb_match:
+        blackboard = bb_match.group(1).strip()
         
-    if "VISUAL_DIRECTIVE:" in text:
-        parts = text.split("VISUAL_DIRECTIVE:", 1)
-        text = parts[0]
-        directive = parts[1].strip()
+    vd_match = re.search(r'\*?\*?VISUAL_DIRECTIVE:\*?\*?\s*(.*?)(?=^[\s\*]*(?:BLACKBOARD|VISUAL_DIRECTIVE|NARRATION|QUESTION):|$)', teaching, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+    if vd_match:
+        directive = vd_match.group(1).strip()
         
-    if "BLACKBOARD:" in text:
-        parts = text.split("BLACKBOARD:", 1)
-        text = parts[0]
-        blackboard = parts[1].strip()
+    # Check for PDF Visual override globally anywhere in the teaching response
+    pdf_match = re.search(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?(\d+)\]?', teaching, re.IGNORECASE)
+    if pdf_match:
+        pdf_visual_id = int(pdf_match.group(1))
+        # Remove the directive to avoid unwanted image generation, and scrub from blackboard
+        directive = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', directive, flags=re.IGNORECASE).strip()
+        blackboard = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', blackboard, flags=re.IGNORECASE).strip()
         
-    if "NARRATION:" in text:
-        narration = text.split("NARRATION:", 1)[1].strip()
+    narr_match = re.search(r'\*?\*?NARRATION:\*?\*?\s*(.*?)(?=^[\s\*]*(?:BLACKBOARD|VISUAL_DIRECTIVE|NARRATION|QUESTION):|$)', teaching, re.DOTALL | re.IGNORECASE | re.MULTILINE)
+    if narr_match:
+        narration = narr_match.group(1).strip()
+        narration = re.sub(r'USE_PDF_VISUAL:\s*\[?(?:ID\s*)?\d+\]?', '', narration, flags=re.IGNORECASE).strip()
     else:
-        # If no explicit NARRATION, use full text for blackboard
+        # If no explicit NARRATION, and no blackboard found either, use full text
         if not blackboard:
-            blackboard = text.strip()
+            blackboard = teaching.strip()
             
-        import re
-        clean_text = re.sub(r'#+\s*', '', text)
+        clean_text = re.sub(r'#+\s*', '', teaching)
         clean_text = re.sub(r'\*\*(.*?)\*\*', r'\1', clean_text)
         clean_text = re.sub(r'\*(.*?)\*', r'\1', clean_text)
         sentences = re.split(r'(?<=[.!?])\s+', clean_text.strip())
         narration = ' '.join(sentences[:3]) if len(sentences) > 3 else clean_text.strip()
         
-    return narration, blackboard, directive
+    return narration, blackboard, directive, pdf_visual_id
+
 
 @router.post("/answer")
 async def submit_answer(
@@ -133,7 +145,32 @@ async def submit_answer(
         teaching_cursor=state_data.get("teaching_cursor", None),
     )
 
-    interaction_type = teacher_engine.classify_intent(state, request.answer)
+    intent_task = asyncio.create_task(teacher_engine.classify_intent(state, request.answer))
+
+    current_concept_title = state.current_concept or lesson.topic
+    memories = MemoryService.get_relevant_memory_for_concept(db, state.student_id, current_concept_title)
+    learner_memory_context = MemoryService.format_memory_context(memories)
+
+    concept = (
+        db.query(Concept)
+        .filter(
+            Concept.lesson_id == session.lesson_id,
+            Concept.title == current_concept_title,
+        )
+        .first()
+    )
+
+    interaction_type = await intent_task
+
+    # Log student message based on intent
+    if interaction_type == "clarification":
+        EventService.log_event(db, session.id, state.student_id, "student_question", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
+        EventService.log_event(db, session.id, state.student_id, "clarification_requested", "student", {}, session.lesson_id, session.current_concept_id)
+    elif interaction_type in ("continue", "continue_step"):
+        EventService.log_event(db, session.id, state.student_id, "student_message", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
+    else:
+        # assessment
+        EventService.log_event(db, session.id, state.student_id, "answer_submitted", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
 
     if interaction_type == "continue":
         state.recent_clarifications = []
@@ -162,7 +199,7 @@ async def submit_answer(
         teaching_context = None
         if lesson.document_id is not None:
             context_query = state.current_concept or state.topic
-            teaching_context = retrieve_relevant_chunks(
+            teaching_context = await retrieve_relevant_chunks(
                 db=db,
                 question=context_query,
                 document_id=lesson.document_id,
@@ -170,12 +207,20 @@ async def submit_answer(
             )
             
         clarification_text = teacher_engine.clarify(state, request.answer, teaching_context)
-        narration, blackboard, directive = parse_teaching_response(clarification_text)
+        narration, blackboard, directive, pdf_visual_id = parse_teaching_response(clarification_text)
+        def pdf_visual_cb(subject: str) -> Optional[dict]:
+            if not session.document_id: return None
+            from app.visuals.retriever import get_candidate_visuals
+            cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+            return cands[0] if cands else None
+
         presentation = await orchestrator.orchestrate(
             teacher_state=state,
             narration=narration,
             blackboard_content=blackboard,
-            visual_directive=directive
+            visual_directive=directive,
+            teaching_context=teaching_context,
+            fetch_pdf_visual_cb=pdf_visual_cb
         )
         presentation_dict = presentation.model_dump()
         
@@ -203,6 +248,22 @@ async def submit_answer(
             step=session.current_step or "clarification",
             state_data=state.summary()
         )
+        
+        EventService.log_event(
+            db, session.id, state.student_id, "clarification_answered", "teacher", 
+            {"text": clarification_text, "concept": state.current_concept}, 
+            session.lesson_id, session.current_concept_id
+        )
+        if presentation and presentation.blackboard and presentation.blackboard.enabled and presentation.blackboard.visual_url:
+            EventService.log_event(
+                db, session.id, state.student_id, "visual_presented", "system", 
+                {
+                    "visual_source": presentation.blackboard.visual_source,
+                    "visual_type": presentation.blackboard.visual_type,
+                    "visual_url": presentation.blackboard.visual_url,
+                    "concept": state.current_concept
+                }, session.lesson_id, session.current_concept_id
+            )
 
         return {
             "session_id": session.id,
@@ -220,14 +281,15 @@ async def submit_answer(
 
     if interaction_type == "continue_step":
         # Path C: Continue Step
-        result = teacher_engine.continue_step(state, teaching_context=None)
+        result = teacher_engine.continue_step(state, teaching_context=None, learner_memory_context=learner_memory_context)
         
-        narration, blackboard, directive = parse_teaching_response(result["teaching"])
+        narration, blackboard, directive, pdf_visual_id = parse_teaching_response(result["teaching"])
         presentation = await orchestrator.orchestrate(
             teacher_state=state,
             narration=narration,
             blackboard_content=blackboard,
-            visual_directive=directive
+            visual_directive=directive,
+            teaching_context=None
         )
         presentation_dict = presentation.model_dump()
         
@@ -250,6 +312,22 @@ async def submit_answer(
             state_data=state.summary()
         )
         
+        EventService.log_event(
+            db, session.id, state.student_id, "teacher_message", "teacher", 
+            {"text": result["teaching"], "concept": state.current_concept}, 
+            session.lesson_id, session.current_concept_id
+        )
+        if presentation and presentation.blackboard and presentation.blackboard.enabled and presentation.blackboard.visual_url:
+            EventService.log_event(
+                db, session.id, state.student_id, "visual_presented", "system", 
+                {
+                    "visual_source": presentation.blackboard.visual_source,
+                    "visual_type": presentation.blackboard.visual_type,
+                    "visual_url": presentation.blackboard.visual_url,
+                    "concept": state.current_concept
+                }, session.lesson_id, session.current_concept_id
+            )
+        
         return {
             "session_id": session.id,
             "evaluation": None,
@@ -266,22 +344,12 @@ async def submit_answer(
 
     # Path B: Assessment Answer
     # 3. Evaluate student's answer
-    result = teacher_engine.answer(
+    result = await teacher_engine.answer(
         state,
         request.answer,
     )
 
     evaluation = result["evaluation"]
-
-    # 4. Find current database concept
-    concept = (
-        db.query(Concept)
-        .filter(
-            Concept.lesson_id == session.lesson_id,
-            Concept.title == state.current_concept,
-        )
-        .first()
-    )
 
     if concept is None:
         raise HTTPException(
@@ -300,6 +368,18 @@ async def submit_answer(
         evaluation=evaluation.feedback,
         misconception=evaluation.misconception,
     )
+    
+    EventService.log_event(
+        db, session.id, state.student_id, "answer_evaluated", "system", 
+        {"correctness": evaluation.correctness, "feedback": evaluation.feedback}, 
+        session.lesson_id, concept.id
+    )
+    if evaluation.misconception:
+        EventService.log_event(
+            db, session.id, state.student_id, "misconception_detected", "system", 
+            {"misconception": evaluation.misconception}, 
+            session.lesson_id, concept.id
+        )
 
     # 6. Persist mastery
     learning_service.update_concept_mastery(
@@ -307,6 +387,25 @@ async def submit_answer(
         concept=concept,
         mastery_score=evaluation.score,
     )
+    
+    EventService.log_event(
+        db, session.id, state.student_id, "mastery_updated", "system", 
+        {"score": evaluation.score}, 
+        session.lesson_id, concept.id
+    )
+
+    # 6b. Roadmap completion evaluation
+    completion_eval = RoadmapService.evaluate_concept_completion(db, state.student_id, concept, state.mastery_score)
+    roadmap_status = completion_eval["status"]
+    
+    # Update TeacherState Adaptation
+    teacher_engine.adaptation.adapt(state, roadmap_status)
+
+    next_concept_title = None
+    if roadmap_status == "complete":
+        next_db_concept = RoadmapService.get_next_concept(db, state.student_id, session.lesson_id, concept)
+        if next_db_concept:
+            next_concept_title = next_db_concept.title
 
     # 7. Continue teaching loop
     teaching_context = None
@@ -317,19 +416,26 @@ async def submit_answer(
             context_query = state.current_concept or state.topic
 
         else:
-            next_concept = teacher_engine.graph.get_next_concept(state)
-            context_query = next_concept or state.topic
+            context_query = next_concept_title or state.topic
 
-        teaching_context = retrieve_relevant_chunks(
+        teaching_context = await retrieve_relevant_chunks(
             db=db,
             question=context_query,
             document_id=lesson.document_id,
             limit=5,
         )
 
+    roadmap_context = RoadmapService.format_roadmap_context(db, state.student_id, session.lesson_id, concept)
+    if teaching_context is None:
+        teaching_context = [roadmap_context]
+    else:
+        teaching_context.insert(0, roadmap_context)
+
     next_step = teacher_engine.next_step(
         state,
         teaching_context=teaching_context,
+        learner_memory_context=learner_memory_context,
+        next_concept_title=next_concept_title,
     )
 
     audio_url = None
@@ -341,12 +447,20 @@ async def submit_answer(
             f"lesson_{session.id}_attempt_{state.attempt_count}.mp3"
         )
         
-        narration, blackboard, directive = parse_teaching_response(next_step["teaching"])
+        narration, blackboard, directive, pdf_visual_id = parse_teaching_response(next_step["teaching"])
+        def pdf_visual_cb(subject: str) -> Optional[dict]:
+            if not session.document_id: return None
+            from app.visuals.retriever import get_candidate_visuals
+            cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+            return cands[0] if cands else None
+
         presentation = await orchestrator.orchestrate(
             teacher_state=state,
             narration=narration,
             blackboard_content=blackboard,
-            visual_directive=directive
+            visual_directive=directive,
+            teaching_context=teaching_context,
+            fetch_pdf_visual_cb=pdf_visual_cb
         )
         presentation_dict = presentation.model_dump()
 
@@ -427,6 +541,34 @@ async def submit_answer(
             status="completed" if next_step["action"] == "completed" else "active",
             state_data=persist_state
         )
+        
+    EventService.log_event(
+        db, session.id, state.student_id, "teacher_message", "teacher", 
+        {"text": next_step["teaching"], "concept": next_step.get("concept", state.current_concept)}, 
+        session.lesson_id, session.current_concept_id
+    )
+    
+    if presentation_dict and presentation_dict.get("blackboard") and presentation_dict["blackboard"].get("enabled") and presentation_dict["blackboard"].get("visual_url"):
+        EventService.log_event(
+            db, session.id, state.student_id, "visual_presented", "system", 
+            {
+                "visual_source": presentation_dict["blackboard"].get("visual_source"),
+                "visual_type": presentation_dict["blackboard"].get("visual_type"),
+                "visual_url": presentation_dict["blackboard"].get("visual_url"),
+                "concept": next_step.get("concept", state.current_concept)
+            }, session.lesson_id, session.current_concept_id
+        )
+        
+    if next_step.get("question"):
+        EventService.log_event(
+            db, session.id, state.student_id, "question_presented", "teacher", 
+            {"text": next_step["question"]}, 
+            session.lesson_id, session.current_concept_id
+        )
+        
+    if next_step["action"] == "completed":
+        EventService.log_event(db, session.id, state.student_id, "lesson_completed", "system", {}, session.lesson_id, session.current_concept_id)
+        EventService.log_event(db, session.id, state.student_id, "session_completed", "system", {}, session.lesson_id, session.current_concept_id)
 
     return {
         "session_id": session.id,
@@ -503,7 +645,32 @@ async def submit_answer_stream(
 
     language = state.language or student.preferred_language
 
-    interaction_type = teacher_engine.classify_intent(state, request.answer)
+    intent_task = asyncio.create_task(teacher_engine.classify_intent(state, request.answer))
+
+    current_concept_title = state.current_concept or lesson.topic
+    memories = MemoryService.get_relevant_memory_for_concept(db, state.student_id, current_concept_title)
+    learner_memory_context = MemoryService.format_memory_context(memories)
+
+    concept = (
+        db.query(Concept)
+        .filter(
+            Concept.lesson_id == session.lesson_id,
+            Concept.title == current_concept_title,
+        )
+        .first()
+    )
+
+    interaction_type = await intent_task
+    
+    # Log student message based on intent
+    if interaction_type == "clarification":
+        EventService.log_event(db, session.id, state.student_id, "student_question", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
+        EventService.log_event(db, session.id, state.student_id, "clarification_requested", "student", {}, session.lesson_id, session.current_concept_id)
+    elif interaction_type in ("continue", "continue_step"):
+        EventService.log_event(db, session.id, state.student_id, "student_message", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
+    else:
+        # assessment
+        EventService.log_event(db, session.id, state.student_id, "answer_submitted", "student", {"text": request.answer}, session.lesson_id, session.current_concept_id)
 
     if interaction_type == "continue":
         state.recent_clarifications = []
@@ -530,16 +697,12 @@ async def submit_answer_stream(
             interaction_type = "clarification"
 
     teaching_context = None
-    if lesson.document_id is not None:
-        if state.needs_reteaching:
-            context_query = state.current_concept or state.topic
-        else:
-            next_concept_title = teacher_engine.graph.get_next_concept(state)
-            context_query = next_concept_title or state.topic
+    if lesson.document_id is not None and interaction_type in ("clarification", "continue_step"):
+        context_query = state.current_concept or state.topic
             
         logger.info("[EDUVA][Latency] RAG_START")
         rag_start = time.time()
-        teaching_context = retrieve_relevant_chunks(
+        teaching_context = await retrieve_relevant_chunks(
             db=db,
             question=context_query,
             document_id=lesson.document_id,
@@ -627,12 +790,20 @@ async def submit_answer_stream(
                 llm_time = time.time() - llm_start
                 logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
                 
-                narration, blackboard, directive = parse_teaching_response(teaching_text)
+                narration, blackboard, directive, pdf_visual_id = parse_teaching_response(teaching_text)
+                def pdf_visual_cb(subject: str) -> Optional[dict]:
+                    if not session.document_id: return None
+                    from app.visuals.retriever import get_candidate_visuals
+                    cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+                    return cands[0] if cands else None
+
                 presentation = await orchestrator.orchestrate(
                     teacher_state=state,
                     narration=narration,
                     blackboard_content=blackboard,
-                    visual_directive=directive
+                    visual_directive=directive,
+                    teaching_context=teaching_context,
+                    fetch_pdf_visual_cb=pdf_visual_cb
                 )
                 presentation_dict = presentation.model_dump()
                 
@@ -668,6 +839,23 @@ async def submit_answer_stream(
                     state_data=state.summary()
                 )
                 
+                # Log teacher clarification response
+                EventService.log_event(
+                    db, session.id, state.student_id, "clarification_answered", "teacher", 
+                    {"text": teaching_text, "concept": state.current_concept}, 
+                    session.lesson_id, session.current_concept_id
+                )
+                if presentation and presentation.blackboard and presentation.blackboard.enabled and presentation.blackboard.visual_url:
+                    EventService.log_event(
+                        db, session.id, state.student_id, "visual_presented", "system", 
+                        {
+                            "visual_source": presentation.blackboard.visual_source,
+                            "visual_type": presentation.blackboard.visual_type,
+                            "visual_url": presentation.blackboard.visual_url,
+                            "concept": state.current_concept
+                        }, session.lesson_id, session.current_concept_id
+                    )
+                
                 logger.info(f"[EDUVA][Latency] SSE_COMPLETE in {time.time() - start_time:.2f}s")
                 
                 yield f"data: {json.dumps({'type': 'complete', 'data': final_response})}\n\n"
@@ -684,6 +872,7 @@ async def submit_answer_stream(
                 gen = await teacher_engine.continue_step_stream(
                     state=state,
                     teaching_context=teaching_context,
+                    learner_memory_context=learner_memory_context,
                 )
                 
                 final_data = None
@@ -751,12 +940,20 @@ async def submit_answer_stream(
                 llm_time = time.time() - llm_start
                 logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
                 
-                narration, blackboard, directive = parse_teaching_response(teaching_text)
+                narration, blackboard, directive, pdf_visual_id = parse_teaching_response(teaching_text)
+                def pdf_visual_cb(subject: str) -> Optional[dict]:
+                    if not session.document_id: return None
+                    from app.visuals.retriever import get_candidate_visuals
+                    cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+                    return cands[0] if cands else None
+
                 presentation = await orchestrator.orchestrate(
                     teacher_state=state,
                     narration=narration,
                     blackboard_content=blackboard,
-                    visual_directive=directive
+                    visual_directive=directive,
+                    teaching_context=None,
+                    fetch_pdf_visual_cb=pdf_visual_cb
                 )
                 presentation_dict = presentation.model_dump()
                 
@@ -785,6 +982,23 @@ async def submit_answer_stream(
                     state_data=state.summary()
                 )
                 
+                # Log teacher message
+                EventService.log_event(
+                    db, session.id, state.student_id, "teacher_message", "teacher", 
+                    {"text": teaching_text, "concept": state.current_concept}, 
+                    session.lesson_id, session.current_concept_id
+                )
+                if presentation and presentation.blackboard and presentation.blackboard.enabled and presentation.blackboard.visual_url:
+                    EventService.log_event(
+                        db, session.id, state.student_id, "visual_presented", "system", 
+                        {
+                            "visual_source": presentation.blackboard.visual_source,
+                            "visual_type": presentation.blackboard.visual_type,
+                            "visual_url": presentation.blackboard.visual_url,
+                            "concept": state.current_concept
+                        }, session.lesson_id, session.current_concept_id
+                    )
+                
                 logger.info(f"[EDUVA][Latency] SSE_COMPLETE in {time.time() - start_time:.2f}s")
                 
                 yield f"data: {json.dumps({'type': 'complete', 'data': final_response})}\n\n"
@@ -798,16 +1012,35 @@ async def submit_answer_stream(
     # 1. Update state based on answer
     logger.info("[EDUVA][Latency] TEACHING_PARSE_START (Evaluation)")
     eval_start = time.time()
-    result = teacher_engine.answer(state, request.answer)
+    result = await teacher_engine.answer(state, request.answer)
     evaluation = result["evaluation"]
     logger.info("[EDUVA][Latency] TEACHING_PARSE_COMPLETE (Evaluation)")
     eval_time = time.time() - eval_start
     logger.info(f"[EDUVA][Latency] EVALUATION_COMPLETE in {eval_time:.2f}s")
     
-    concept = db.query(Concept).filter(
-        Concept.lesson_id == session.lesson_id,
-        Concept.title == state.current_concept,
-    ).first()
+    if evaluation.correctness == "retry_required":
+        state.assessment_active = True
+        state.attempt_count = max(0, state.attempt_count - 1)
+        
+        async def fast_fallback_generator():
+            final_response = {
+                "session_id": session.id,
+                "evaluation": evaluation.summary(),
+                "action": "assessment_retry",
+                "concept": state.current_concept,
+                "teaching": f"NARRATION: {evaluation.feedback}\n\nQUESTION: {state.last_question}",
+                "question": state.last_question,
+                "presentation": None,
+                "audio_url": None,
+                "state": state.summary(),
+                "interaction_type": "assessment",
+                "assessment_active": True,
+            }
+            yield f"data: {json.dumps({'type': 'teaching_chunk', 'content': evaluation.feedback})}\n\n"
+            yield f"data: {json.dumps({'type': 'complete', 'data': final_response})}\n\n"
+        
+        return StreamingResponse(fast_fallback_generator(), media_type="text/event-stream")
+
 
     if concept is None:
         raise HTTPException(status_code=404, detail="Current concept not found")
@@ -818,22 +1051,85 @@ async def submit_answer_stream(
         is_correct=evaluation.correctness == "correct",
         evaluation=evaluation.feedback, misconception=evaluation.misconception,
     )
+    
+    EventService.log_event(
+        db, session.id, state.student_id, "answer_evaluated", "system", 
+        {"correctness": evaluation.correctness, "feedback": evaluation.feedback}, 
+        session.lesson_id, concept.id
+    )
+    if evaluation.misconception:
+        EventService.log_event(
+            db, session.id, state.student_id, "misconception_detected", "system", 
+            {"misconception": evaluation.misconception}, 
+            session.lesson_id, concept.id
+        )
+    
     learning_service.update_concept_mastery(db=db, concept=concept, mastery_score=evaluation.score)
+    EventService.log_event(
+        db, session.id, state.student_id, "mastery_updated", "system", 
+        {"score": evaluation.score}, 
+        session.lesson_id, concept.id
+    )
+
+    # 6b. Roadmap completion evaluation
+    completion_eval = RoadmapService.evaluate_concept_completion(db, state.student_id, concept, state.mastery_score)
+    roadmap_status = completion_eval["status"]
+    
+    # Update TeacherState Adaptation
+    teacher_engine.adaptation.adapt(state, roadmap_status)
+
+    next_concept_title = None
+    if roadmap_status == "complete":
+        next_db_concept = RoadmapService.get_next_concept(db, state.student_id, session.lesson_id, concept)
+        if next_db_concept:
+            next_concept_title = next_db_concept.title
+
+    if lesson.document_id is not None:
+        if state.needs_reteaching:
+            context_query = state.current_concept or state.topic
+        else:
+            context_query = next_concept_title or state.topic
+            
+        logger.info("[EDUVA][Latency] RAG_START (Assessment)")
+        rag_start = time.time()
+        teaching_context = await retrieve_relevant_chunks(
+            db=db,
+            question=context_query,
+            document_id=lesson.document_id,
+            limit=5,
+        )
+        rag_time = time.time() - rag_start
+        logger.info(f"[EDUVA][Latency] RAG_COMPLETE in {rag_time:.2f}s")
+
+    roadmap_context = RoadmapService.format_roadmap_context(db, state.student_id, session.lesson_id, concept)
+    if teaching_context is None:
+        teaching_context = [roadmap_context]
+    else:
+        teaching_context.insert(0, roadmap_context)
 
     async def event_generator():
         try:
             # Yield early presentation so new video can mount immediately if subtopic changed
+            def pdf_visual_cb(subject: str) -> Optional[dict]:
+                if not session.document_id: return None
+                from app.visuals.retriever import get_candidate_visuals
+                cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+                return cands[0] if cands else None
+
             partial_presentation = await orchestrator.orchestrate(
                 teacher_state=state,
                 narration="",
                 blackboard_content="",
-                visual_directive=None
+                visual_directive=None,
+                fetch_pdf_visual_cb=pdf_visual_cb
             )
             yield f"data: {json.dumps({'type': 'presentation', 'data': partial_presentation.model_dump()})}\n\n"
 
             gen = await teacher_engine.next_step_stream(
                 state=state,
                 teaching_context=teaching_context,
+                learner_memory_context=learner_memory_context,
+                next_concept_title=next_concept_title,
             )
             
             final_data = None
@@ -883,12 +1179,20 @@ async def submit_answer_stream(
             logger.info(f"[EDUVA][Latency] LLM_COMPLETE in {llm_time:.2f}s")
             logger.info(f"[EDUVA][Groq] Full generation latency: {llm_time:.2f}s")
             
-            narration, blackboard, directive = parse_teaching_response(teaching_text)
+            narration, blackboard, directive, pdf_visual_id = parse_teaching_response(teaching_text)
+            def pdf_visual_cb(subject: str) -> Optional[dict]:
+                if not session.document_id: return None
+                from app.visuals.retriever import get_candidate_visuals
+                cands = get_candidate_visuals(db=db, document_id=session.document_id, concept=subject)
+                return cands[0] if cands else None
+
             presentation = await orchestrator.orchestrate(
                 teacher_state=state,
                 narration=narration,
                 blackboard_content=blackboard,
-                visual_directive=directive
+                visual_directive=directive,
+                teaching_context=teaching_context,
+                fetch_pdf_visual_cb=pdf_visual_cb
             )
             presentation_dict = presentation.model_dump()
             
@@ -944,6 +1248,34 @@ async def submit_answer_stream(
                     status="completed" if final_data["action"] == "completed" else "active",
                     state_data=persist_state
                 )
+                
+            EventService.log_event(
+                db, session.id, state.student_id, "teacher_message", "teacher", 
+                {"text": teaching_text, "concept": final_data.get("concept", state.current_concept)}, 
+                session.lesson_id, session.current_concept_id
+            )
+            
+            if presentation and presentation.blackboard and presentation.blackboard.enabled and presentation.blackboard.visual_url:
+                EventService.log_event(
+                    db, session.id, state.student_id, "visual_presented", "system", 
+                    {
+                        "visual_source": presentation.blackboard.visual_source,
+                        "visual_type": presentation.blackboard.visual_type,
+                        "visual_url": presentation.blackboard.visual_url,
+                        "concept": final_data.get("concept", state.current_concept)
+                    }, session.lesson_id, session.current_concept_id
+                )
+                
+            if final_data.get("question"):
+                EventService.log_event(
+                    db, session.id, state.student_id, "question_presented", "teacher", 
+                    {"text": final_data["question"]}, 
+                    session.lesson_id, session.current_concept_id
+                )
+                
+            if final_data["action"] == "completed":
+                EventService.log_event(db, session.id, state.student_id, "lesson_completed", "system", {}, session.lesson_id, session.current_concept_id)
+                EventService.log_event(db, session.id, state.student_id, "session_completed", "system", {}, session.lesson_id, session.current_concept_id)
                 
             db_time = time.time() - db_start
             logger.info(f"[EDUVA][Latency] DB_COMPLETE in {db_time:.2f}s")
